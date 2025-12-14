@@ -1,0 +1,2300 @@
+// ★ 曜日を統一表記(Sun〜Sat)に揃える共通関数
+function normalizeYoubi(y) {
+  if (!y) return null;
+  y = String(y).trim();
+
+  // 英語3文字
+  var en = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  if (en.indexOf(y) >= 0) return y;
+
+  // 英語フル
+  var enFull = {
+    'Sunday':'Sun','Monday':'Mon','Tuesday':'Tue','Wednesday':'Wed',
+    'Thursday':'Thu','Friday':'Fri','Saturday':'Sat'
+  };
+  if (enFull[y]) return enFull[y];
+
+  // 日本語1文字
+  var jp1 = { '日':'Sun','月':'Mon','火':'Tue','水':'Wed','木':'Thu','金':'Fri','土':'Sat' };
+  if (jp1[y]) return jp1[y];
+
+  // 「◯曜」
+  var jp2 = {
+    '日曜':'Sun','月曜':'Mon','火曜':'Tue','水曜':'Wed',
+    '木曜':'Thu','金曜':'Fri','土曜':'Sat'
+  };
+  if (jp2[y]) return jp2[y];
+
+  // 「◯曜日」
+  var jp3 = {
+    '日曜日':'Sun','月曜日':'Mon','火曜日':'Tue','水曜日':'Wed',
+    '木曜日':'Thu','金曜日':'Fri','土曜日':'Sat'
+  };
+  if (jp3[y]) return jp3[y];
+
+  return null;
+}
+
+function 週ビューを更新() {
+  const ss = SpreadsheetApp.getActive();
+  const resultSheet  = ss.getSheetByName('割当結果');
+  const viewSheet    = ss.getSheetByName('週ビュー');
+  const staffSheet   = ss.getSheetByName('スタッフマスタ');
+  const patientSheet = ss.getSheetByName('患者マスタ');
+  const tz = ss.getSpreadsheetTimeZone();
+
+  if (!resultSheet || !viewSheet) {
+    SpreadsheetApp.getUi().alert('「割当結果」シートと「週ビュー」シートを作ってから実行してください。');
+    return;
+  }
+
+  // ▼ スタッフマスタから staff_id → 性別 を作成
+  const staffGenderMap = {};
+  if (staffSheet) {
+    const sValues = staffSheet.getDataRange().getValues();
+    if (sValues.length > 1) {
+      const sHeader = sValues[0];
+      const sData   = sValues.slice(1);
+      const sIdxId   = sHeader.indexOf('staff_id');
+      const sIdxName = sHeader.indexOf('スタッフ名');
+      const sIdxGen  = sHeader.indexOf('性別');
+      sData.forEach(r => {
+        const id = r[sIdxId];
+        if (!id) return;
+        staffGenderMap[id] = {
+          gender: sIdxGen >= 0 ? (r[sIdxGen] || '') : '',
+          name  : sIdxName >= 0 ? (r[sIdxName] || '') : ''
+        };
+      });
+    }
+  }
+
+  // ▼ 患者マスタから patient_id → 性別 を作成
+  const patientGenderMap = {};
+  if (patientSheet) {
+    const pValues = patientSheet.getDataRange().getValues();
+    if (pValues.length > 1) {
+      const pHeader = pValues[0];
+      const pData   = pValues.slice(1);
+      const pIdxId  = pHeader.indexOf('patient_id');
+      const pIdxGen = pHeader.indexOf('性別');
+      pData.forEach(r => {
+        const id = r[pIdxId];
+        if (!id) return;
+        patientGenderMap[id] = pIdxGen >= 0 ? (r[pIdxGen] || '') : '';
+      });
+    }
+  }
+
+  // ◆ 今週の月曜日〜日曜日
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const day = today.getDay();          // 日=0, 月=1, …
+  const diffToMonday = (day + 6) % 7;  // 月曜を0にする調整
+  const start = new Date(today);
+  start.setDate(today.getDate() - diffToMonday);
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+
+  // ◆ 「割当結果」からデータ取得
+  const values = resultSheet.getDataRange().getValues();
+  if (values.length <= 1) {
+    SpreadsheetApp.getUi().alert('「割当結果」にデータがありません。');
+    return;
+  }
+  const header = values[0];
+  const data   = values.slice(1);
+
+  const idxDate    = header.indexOf('日付');
+  const idxStaff   = header.indexOf('スタッフ名');
+  const idxStaffId = header.indexOf('staff_id');
+  const idxStart   = header.indexOf('開始時刻');
+  const idxEnd     = header.indexOf('終了時刻');
+  const idxPatient = header.indexOf('患者名');
+  const idxPid     = header.indexOf('patient_id');
+
+  if ([idxDate,idxStaff,idxStaffId,idxStart,idxEnd,idxPatient,idxPid].some(i => i === -1)) {
+    SpreadsheetApp.getUi().alert('「割当結果」のヘッダー名を確認してください。');
+    return;
+  }
+
+  // ◆ 今週分だけに絞る
+  const startStr = Utilities.formatDate(start, tz, 'yyyy/MM/dd');
+  const endStr   = Utilities.formatDate(end,   tz, 'yyyy/MM/dd');
+
+  const weekData = data.filter(row => {
+    const d = row[idxDate];
+    if (!(d instanceof Date)) return false;
+    const ds = Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+    return ds >= startStr && ds <= endStr;
+  });
+
+  // ◆ スタッフ一覧（staff_id 単位）を作る
+  const staffMap = new Map(); // key = staff_id または 名前(未割当用)
+
+  weekData.forEach(r => {
+    const sid   = r[idxStaffId];
+    const sname = r[idxStaff] || '';
+    if (!sid && !sname) return;
+
+    const key = sid || sname; // 未割当は staff_id が空
+    if (!staffMap.has(key)) {
+      let gender = '';
+      if (sid && staffGenderMap[sid]) {
+        gender = staffGenderMap[sid].gender || '';
+      }
+      staffMap.set(key, { id: sid || '', name: sname, gender: gender });
+    }
+  });
+
+  let staffList = Array.from(staffMap.values());
+
+  // 未割当行は最後に出す
+  staffList.sort((a,b) => {
+    if (a.name === '未割当' && b.name !== '未割当') return 1;
+    if (b.name === '未割当' && a.name !== '未割当') return -1;
+    return a.name.localeCompare(b.name, 'ja');
+  });
+
+  // ◆ 週ビューを作り直す
+  viewSheet.clear();
+  viewSheet.getRange(1,1).setValue('職員名');
+
+  // 1行目に日付
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    const label = Utilities.formatDate(d, tz, 'MM/dd(EEE)');
+    viewSheet.getRange(1, 2 + i).setValue(label);
+  }
+
+  // 左端に staff_id + 名前 + 性別
+  staffList.forEach((st, idx) => {
+    let label = '';
+    if (st.id) label += st.id + ' ';
+    label += st.name || '';
+    if (st.gender) label += '（' + st.gender + '）';
+    viewSheet.getRange(2 + idx, 1).setValue(label);
+  });
+
+  // ◆ スタッフ × 日付ごとにセルの中身を作る
+  staffList.forEach((st, rIndex) => {
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      const targetDateStr = Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+
+      // 該当する訪問を抽出（staff_id 優先、なければスタッフ名で）
+      const visits = weekData.filter(row => {
+        const d2 = row[idxDate];
+        const ds2 = Utilities.formatDate(d2, tz, 'yyyy/MM/dd');
+        const sid   = row[idxStaffId] || '';
+        const sname = row[idxStaff]   || '';
+        const key   = sid || sname;
+        return key === (st.id || st.name) && ds2 === targetDateStr;
+      });
+
+      // 開始時刻順
+      visits.sort((a,b) => a[idxStart] - b[idxStart]);
+
+      const lines = visits.map(v => {
+        const startVal = v[idxStart];
+        const endVal   = v[idxEnd];
+        const pid      = v[idxPid] || '';
+        const pname    = v[idxPatient] || '';
+        const pGender  = pid ? (patientGenderMap[pid] || '') : '';
+
+        function formatTime(val) {
+          if (!val) return '';
+          if (val instanceof Date) {
+            return Utilities.formatDate(val, tz, 'HH:mm');
+          }
+          if (typeof val === 'number') {
+            const base = new Date(1899, 11, 30);
+            const ms   = val * 24 * 60 * 60 * 1000;
+            const d    = new Date(base.getTime() + ms);
+            return Utilities.formatDate(d, tz, 'HH:mm');
+          }
+          return String(val);
+        }
+
+        const stime = formatTime(startVal);
+        const etime = formatTime(endVal);
+
+        let pidPart = '';
+        if (pid) {
+          pidPart = pid;
+          if (pGender) pidPart += '（' + pGender + '）';
+          pidPart += ' ';
+        }
+
+        if (!stime && !etime) {
+          return pidPart + pname;
+        }
+        return `${stime}〜${etime} ${pidPart}${pname}`;
+      });
+
+      const cellText = lines.join('\n');
+      if (cellText) {
+        const cell = viewSheet.getRange(2 + rIndex, 2 + i);
+        cell.setValue(cellText);
+        cell.setWrap(true);
+      }
+    }
+  });
+}
+
+function 割当結果を作成() {
+  var ss = SpreadsheetApp.getActive();
+  var tz = ss.getSpreadsheetTimeZone();
+
+  var weeklySheet = ss.getSheetByName('週間リクエスト');
+  var staffSheet  = ss.getSheetByName('スタッフマスタ');
+  var resultSheet = ss.getSheetByName('割当結果');
+ var historySheet = ss.getSheetByName('訪問履歴');  // ★追加
+  var patientSheet = ss.getSheetByName('患者マスタ');
+  if (!patientSheet) {
+    SpreadsheetApp.getUi().alert('「患者マスタ」シートがありません。');
+    return;
+  }
+
+  if (!weeklySheet || !staffSheet || !resultSheet) {
+    SpreadsheetApp.getUi().alert('「週間リクエスト」「スタッフマスタ」「割当結果」シートがあるか確認してください。');
+    return;
+  }
+      if (!historySheet) {
+    historySheet = ss.insertSheet('訪問履歴');
+  } 
+  if (historySheet.getLastRow() === 0) {
+    var histHeader = [
+      'visit_id',
+      '日付',
+      '曜日',
+      'staff_id',
+      'スタッフ名',
+      'patient_id',
+      '患者名',
+      'エリア',
+      '開始時刻',
+      '終了時刻',
+      'サービス時間',
+      '備考'
+    ];
+    historySheet.getRange(1, 1, 1, histHeader.length).setValues([histHeader]);
+  }
+
+  function calcDistanceKm(lat1, lng1, lat2, lng2) {
+  if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return null;
+
+  const R = 6371; // 地球半径 km
+  const toRad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRad;
+  const dLng = (lng2 - lng1) * toRad;
+
+  const a =
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
+    Math.sin(dLng/2) * Math.sin(dLng/2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+function distToScore(km) {
+  if (km == null) return 99; // 不明は遠い扱い
+  if (km <= 2)  return 0;  // 2km以内
+  if (km <= 5)  return 1;  // 5km以内
+  if (km <= 10) return 2;  // 10km以内
+  return 5;                // かなり遠い
+}
+
+  // ◆ 週間リクエスト読み込み
+  var wValues = weeklySheet.getDataRange().getValues();
+  if (wValues.length <= 1) {
+    SpreadsheetApp.getUi().alert('「週間リクエスト」にデータがありません。');
+    return;
+  }
+  var wHeader = wValues[0];
+  var wData   = wValues.slice(1);
+    var wIdx = {
+    date      : wHeader.indexOf('日付'),
+    youbi     : wHeader.indexOf('曜日'),
+    pid       : wHeader.indexOf('patient_id'),
+    pname     : wHeader.indexOf('患者名'),
+    area      : wHeader.indexOf('エリア'),
+    start     : wHeader.indexOf('開始時刻'),
+    end       : wHeader.indexOf('終了時刻'),
+    svcMin    : wHeader.indexOf('サービス時間'),
+    sexLimit  : wHeader.indexOf('性別制限'),
+    contPref  : wHeader.indexOf('継続希望'),
+    change    : wHeader.indexOf('変更区分（通常/変更/追加/キャンセル）'),
+    prevSid   : wHeader.indexOf('前回担当スタッフID'),
+    prevSname : wHeader.indexOf('前回担当スタッフ名'),
+    timeType  : wHeader.indexOf('時間タイプ'),     // ★追加
+    earliest  : wHeader.indexOf('希望最早時刻'),   // ★追加
+    latest    : wHeader.indexOf('希望最遅時刻'),   // ★追加
+    note      : wHeader.indexOf('備考')
+  };
+
+    var patientSheet = ss.getSheetByName('患者マスタ');
+  if (!patientSheet) {
+    SpreadsheetApp.getUi().alert('「患者マスタ」シートが見つかりません。');
+    return;
+  }
+
+  // 患者マスタ読み込み（patient_id → {lat, lng, area,...}）
+  var pValues = patientSheet.getDataRange().getValues();
+  var pHeader = pValues[0];
+  var pData   = pValues.slice(1);
+
+ var pIdx = {
+  id   : pHeader.indexOf('patient_id'),
+  name : pHeader.indexOf('患者名'),
+  area : pHeader.indexOf('エリア'),
+  lat  : pHeader.indexOf('緯度'),
+  lng  : pHeader.indexOf('経度'),
+  svcMin: pHeader.indexOf('サービス時間')  // ★追加
+};
+
+var patientMap = {};
+pData.forEach(function(row){
+  var id = row[pIdx.id];
+  if (!id) return;
+  patientMap[id] = {
+    name: row[pIdx.name],
+    area: row[pIdx.area],
+    lat : Number(row[pIdx.lat]) || null,
+    lng : Number(row[pIdx.lng]) || null,
+    svcMin: Number(row[pIdx.svcMin]) || 0    // ★追加：分数（30など）
+  };
+});
+
+  // ◆ スタッフマスタ読み込み
+  var sValues = staffSheet.getDataRange().getValues();
+  if (sValues.length <= 1) {
+    SpreadsheetApp.getUi().alert('「スタッフマスタ」にスタッフが1人もいません。');
+    return;
+  }
+  var sHeader = sValues[0];
+  var sData   = sValues.slice(1);
+
+  var sIdx = {
+    id      : sHeader.indexOf('staff_id'),
+    name    : sHeader.indexOf('スタッフ名'),
+    gender  : sHeader.indexOf('性別'),
+    addr    : sHeader.indexOf('拠点住所'),
+    lat     : sHeader.indexOf('緯度'),   // ★追加
+    lng     : sHeader.indexOf('経度'),   // ★追加
+    shiftS  : sHeader.indexOf('シフト開始'),
+    shiftE  : sHeader.indexOf('シフト終了'),
+    days    : sHeader.indexOf('勤務曜日'),
+    areas   : sHeader.indexOf('得意エリア'),
+    maxPer  : sHeader.indexOf('最大訪問件数/日'),
+    skill   : sHeader.indexOf('スキル'),
+    note    : sHeader.indexOf('備考')
+  };
+
+  // ◆ 曜日・継続希望などのヘルパー
+  var youbiMap = {
+    'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3,
+    'Thu': 4, 'Fri': 5, 'Sat': 6
+  };
+  var jpToEn = { '日':'Sun','月':'Mon','火':'Tue','水':'Wed','木':'Thu','金':'Fri','土':'Sat' };
+
+
+
+  function parseDays(str) {
+    if (!str) return [];
+    var parts = String(str).split(/[,\u3001\/・\s]+/);
+    var out = [];
+    parts.forEach(function(p){
+      p = p.trim();
+      if (!p) return;
+      var y = normalizeYoubi(p);
+      if (y && out.indexOf(y) === -1) out.push(y);
+    });
+    return out;
+  }
+
+  function toMinutes(v) {
+    if (typeof v === 'number') {
+      return Math.round(v * 24 * 60);           // 1日=1.0
+    } else if (v instanceof Date) {
+      return v.getHours() * 60 + v.getMinutes();
+    } else {
+      return null;
+    }
+  }
+
+  function normalizeContPref(v) {
+    if (!v) return '';
+    v = String(v).trim();
+    if (v === '同じ人' || v === '同じ人希望') return '同じ人希望';
+    if (v === 'ローテーション優先') return 'ローテーション優先';
+    if (v === 'どちらでも') return 'どちらでも';
+    return v;
+  }
+    // ★移動後に必ず足すバッファ時間（分）
+  var EXTRA_BUFFER_MIN = 15;  // 好きな値に調整可（5〜15分くらい）
+
+  // ◆ スタッフ情報整形
+  var staffList = [];
+  sData.forEach(function(row){
+    var id = row[sIdx.id];
+    var name = row[sIdx.name];
+    if (!id || !name) return;
+
+    var workDays = parseDays(row[sIdx.days]);
+    var shiftStartMin = toMinutes(row[sIdx.shiftS]);
+    var shiftEndMin   = toMinutes(row[sIdx.shiftE]);
+    var areasStr = row[sIdx.areas] || '';
+    var areaList = String(areasStr).split(/[,\u3001\/・\s]+/).map(function(s){ return s.trim(); }).filter(function(s){ return s; });
+    var maxPerDay = Number(row[sIdx.maxPer] || 0) || 999;
+
+        staffList.push({
+      id: id,
+      name: name,
+      gender: row[sIdx.gender] || '',
+      lat: row[sIdx.lat],   // ★追加
+      lng: row[sIdx.lng],   // ★追加
+      shiftStartMin: shiftStartMin,
+      shiftEndMin: shiftEndMin,
+      workDays: workDays,
+      areas: areaList,
+      maxPerDay: maxPerDay
+    });
+  });
+
+  if (staffList.length === 0) {
+    SpreadsheetApp.getUi().alert('有効なスタッフ情報がありません。');
+    return;
+  }
+
+  // ◆ スタッフ×日付ごとの件数管理
+  var assignCountMap = {}; // key = staffId|yyyy/MM/dd → 数
+
+  function getAssignCount(staffId, dateStr) {
+    var key = staffId + '|' + dateStr;
+    return assignCountMap[key] || 0;
+  }
+  function incAssignCount(staffId, dateStr) {
+    var key = staffId + '|' + dateStr;
+    assignCountMap[key] = (assignCountMap[key] || 0) + 1;
+  }
+
+    // ◆ 患者×スタッフごとの「その週の担当回数」
+  var patientWeekCount = {}; // key = patient_id + '|' + staffId → 数
+
+  function getPatientWeekCount(pid, staffId) {
+    var key = pid + '|' + staffId;
+    return patientWeekCount[key] || 0;
+  }
+  function incPatientWeekCount(pid, staffId) {
+    var key = pid + '|' + staffId;
+    patientWeekCount[key] = (patientWeekCount[key] || 0) + 1;
+  }
+
+
+  // ◆ 週間リクエスト → 対象行だけ配列に
+  var weeklyRequests = [];
+  wData.forEach(function(row){
+    var d = row[wIdx.date];
+    if (!(d instanceof Date)) return;
+
+    var changeType = row[wIdx.change];
+    if (changeType === 'キャンセル') return;  // キャンセルは割当対象外
+
+    weeklyRequests.push({
+      row: row,
+      date: d,
+      dateStr: Utilities.formatDate(d, tz, 'yyyy/MM/dd'),
+      start: row[wIdx.start],
+      end:   row[wIdx.end]
+    });
+  });
+
+  // 日付＋開始時刻でソート
+  weeklyRequests.sort(function(a,b){
+    if (a.date.getTime() !== b.date.getTime()) return a.date - b.date;
+    return toMinutes(a.start) - toMinutes(b.start);
+  });
+
+  // ◆ 割当結果配列
+  var resultRows = [];
+
+  weeklyRequests.forEach(function(item, idx){
+    var row      = item.row;
+    var dateObj  = item.date;
+    var dateStr  = item.dateStr;
+    var youbiRaw = row[wIdx.youbi];
+    var youbi    = normalizeYoubi(youbiRaw);
+    var pid      = row[wIdx.pid];
+    var pname    = row[wIdx.pname];
+    var area     = row[wIdx.area];
+    var start    = row[wIdx.start];
+    var end      = row[wIdx.end];
+    // ★ サービス時間：文字列 → 分数の数値に変換する
+var svcRaw = row[wIdx.svcMin];      // 週間リクエストのセルそのまま
+var svcMin = Number(svcRaw);        // まずは素直に数値にしてみる
+
+// 1) 数値でない／0 のときは、患者マスタのサービス時間（分）を優先
+if (!svcMin && patientMap[pid] && patientMap[pid].svcMin) {
+  svcMin = Number(patientMap[pid].svcMin) || 0;
+}
+
+// 2) それでも 0 の場合は、文字列中の数字だけ抜き出す
+//    例: "サンプル患者5 終日" → 中に「5」はあるけど分じゃない、
+//        "サンプル患者5 30分" なら 30 を拾える
+if (!svcMin && typeof svcRaw === 'string') {
+  var m = svcRaw.match(/(\d+)/);
+  if (m) svcMin = Number(m[1]);
+}
+
+// 3) 最後の保険
+if (!svcMin) svcMin = 0;
+
+    var sexLimit = row[wIdx.sexLimit];
+    var contPrefRaw = row[wIdx.contPref];
+    var contPref    = normalizeContPref(contPrefRaw);
+    var prevSid  = row[wIdx.prevSid];
+    var prevSname= row[wIdx.prevSname];
+    var note     = row[wIdx.note];
+    var timeType = row[wIdx.timeType];   // ★追加
+    var earliest = row[wIdx.earliest];   // ★追加
+    var latest   = row[wIdx.latest];     // ★追加
+
+
+    var startMin = toMinutes(start);
+    var endMin   = toMinutes(end);
+
+    var pInfo = patientMap[pid] || {};
+    var plat  = pInfo.lat;
+    var plng  = pInfo.lng;
+
+    // このリクエストで前回担当を避けるか？（ローテーション優先）
+    var avoidPrev = (contPref === 'ローテーション優先' && prevSid);
+       // 時間タイプごとの時間窓（分）に変換しておく
+    var earliestMin = earliest ? toMinutes(earliest) : null;
+    var latestMin   = latest   ? toMinutes(latest)   : null;
+
+    // このリクエストに対して、あるスタッフが対応できるかどうか
+    function canStaffServe(st, preferAreaFlagObj) {
+      // 性別制限
+      if (sexLimit === '女性のみ' && st.gender !== '女性') return false;
+      if (sexLimit === '男性のみ' && st.gender !== '男性') return false;
+
+      // 勤務曜日
+      if (youbi && st.workDays.length > 0 && st.workDays.indexOf(youbi) === -1) return false;
+
+      // シフト時間判定
+      if (st.shiftStartMin != null && st.shiftEndMin != null) {
+
+        if (timeType === '固定') {
+          // 固定は「開始〜終了」がまるごとシフト内に入っていないとダメ
+          if (startMin != null && startMin < st.shiftStartMin) return false;
+          if (endMin   != null && endMin   > st.shiftEndMin)   return false;
+
+        } else {
+          // 終日 / 時間帯 / 午前 / 午後 など「可動」枠
+          // リクエスト側の時間窓
+          var reqStart = earliestMin != null ? earliestMin : startMin;
+          var reqEnd   = latestMin   != null ? latestMin   : endMin;
+
+          // どちらか欠けていたら、とりあえずシフトの端を使う
+          if (reqStart == null) reqStart = st.shiftStartMin;
+          if (reqEnd   == null) reqEnd   = st.shiftEndMin;
+
+          // 「リクエスト時間窓」と「シフト時間」が1分も重ならなければ NG
+          var latestStart  = Math.max(reqStart, st.shiftStartMin);
+          var earliestEnd  = Math.min(reqEnd,   st.shiftEndMin);
+          if (latestStart >= earliestEnd) return false;
+        }
+      }
+
+      // 日ごとの最大件数
+      var count = getAssignCount(st.id, dateStr);
+      if (count >= st.maxPerDay) return false;
+
+      // ★ エリアは使わないので常に false にしておく
+      preferAreaFlagObj.flag = false;
+
+      return true;
+    }
+
+
+
+    var chosenStaff = null;
+    var chosenPreferArea = false;
+
+    // ◆ 継続希望＝同じ人希望 の場合、前回担当を最優先
+    if (contPref === '同じ人希望' && prevSid) {
+      var stPrev = null;
+      for (var si = 0; si < staffList.length; si++) {
+        if (staffList[si].id === prevSid) {
+          stPrev = staffList[si];
+          break;
+        }
+      }
+      if (stPrev) {
+        var objPrev = { flag: false };
+        if (canStaffServe(stPrev, objPrev)) {
+          chosenStaff = stPrev;
+          chosenPreferArea = objPrev.flag;
+        }
+      }
+    }
+        // ◆ まだ決まっていなければ、全スタッフから候補を探す
+    if (!chosenStaff) {
+      var candidates = [];
+
+      staffList.forEach(function (st) {
+        // ローテーション優先なら前回担当を候補から除外
+        if (avoidPrev && prevSid && st.id === prevSid) return;
+
+        var obj = { flag: false };
+        if (!canStaffServe(st, obj)) return;
+
+        // スタッフ側の緯度経度
+        var slat = st.lat;
+        var slng = st.lng;
+
+        // 距離と距離スコアを計算（どちらかが無ければ null 扱い）
+        var distKm = calcDistanceKm(plat, plng, slat, slng);
+        var distScore = distToScore(distKm); // 0 が一番近い
+
+        candidates.push({
+          staff: st,
+          dayCount: getAssignCount(st.id, dateStr),       // その日の件数
+          patientCount: getPatientWeekCount(pid, st.id),  // その週での患者×スタッフ回数
+          distKm: distKm,
+          distScore: distScore,
+          samePatientToday: false                         // 後で上書き
+        });
+      });
+
+      if (candidates.length > 0) {
+        // すでに同じ患者を同じ日に担当しているかチェック
+        candidates.forEach(function (c) {
+          var st = c.staff;
+          var sid = st.id;
+          var samePatientToday = false;
+
+          for (var r = 0; r < resultRows.length; r++) {
+            var rowR = resultRows[r];
+            var rStaffId = rowR[3]; // staff_id
+            var rPid = rowR[5];     // patient_id
+            var rDate = rowR[1];    // 日付(Date)
+
+            if (rStaffId === sid && rPid === pid) {
+              var rDateStr = Utilities.formatDate(rDate, tz, 'yyyy/MM/dd');
+              if (rDateStr === dateStr) {
+                samePatientToday = true;
+                break;
+              }
+            }
+          }
+          c.samePatientToday = samePatientToday;
+        });
+
+        // ★ 優先順位：
+        // 1) 同じ患者をその日にすでに担当している人（samePatientToday）
+        // 2) ローテーション優先なら、その週での担当回数が少ない人（patientCount）
+        // 3) 距離スコアが小さい人（distScore）
+        // 4) その日の件数が少ない人（dayCount）
+        candidates.sort(function (a, b) {
+          if (a.samePatientToday !== b.samePatientToday) {
+            return a.samePatientToday ? -1 : 1;
+          }
+
+          if (contPref === 'ローテーション優先' && a.patientCount !== b.patientCount) {
+            return a.patientCount - b.patientCount;
+          }
+
+          if (a.distScore !== b.distScore) {
+            return a.distScore - b.distScore;
+          }
+
+          return a.dayCount - b.dayCount;
+        });
+
+        chosenStaff = candidates[0].staff;
+      }
+    }
+
+    // -----------------------------
+    // ★ 第2フェーズ：少し条件をゆるめてでも割当する
+    // （最大訪問件数/日の制限だけ無視する）
+    // -----------------------------
+    if (!chosenStaff) {
+      var fallback = [];
+
+      staffList.forEach(function (st) {
+        // 性別制限は守る
+        if (sexLimit === '女性のみ' && st.gender !== '女性') return;
+        if (sexLimit === '男性のみ' && st.gender !== '男性') return;
+
+        // 勤務曜日は守る
+        if (youbi && st.workDays.length > 0 && st.workDays.indexOf(youbi) === -1) return;
+
+        // シフト時間も守る
+        if (startMin != null && st.shiftStartMin != null && startMin < st.shiftStartMin) return;
+        if (endMin   != null && st.shiftEndMin   != null && endMin   > st.shiftEndMin)   return;
+
+        // ★ここでは maxPerDay は見ない（= 上限超えてもOK）
+        var dayCount = getAssignCount(st.id, dateStr);
+
+        fallback.push({
+          staff   : st,
+          dayCount: dayCount
+        });
+      });
+
+      if (fallback.length > 0) {
+        // その日の件数が少ない人から使う
+        fallback.sort(function(a, b) {
+          return a.dayCount - b.dayCount;
+        });
+
+        chosenStaff = fallback[0].staff;
+
+        // 備考に「上限超過で自動割当」と追記
+        note = (note || '') + ' / 自動割当: 上限超過の可能性あり';
+      }
+    }
+
+    // ◆ staffId/staffName を決める   ← この行の直前までを差し替え
+
+    // ◆ staffId/staffName を決める
+    var staffId   = '';
+    var staffName = '';
+        if (chosenStaff) {
+      staffId   = chosenStaff.id;
+      staffName = chosenStaff.name;
+      incAssignCount(staffId, dateStr);     // その日の件数
+      incPatientWeekCount(pid, staffId);    // ★その週の「患者×スタッフ」回数
+    } else {
+      staffId   = '';
+      staffName = '未割当';
+    }
+
+    var visitId = 'V' + Utilities.formatString('%03d', idx + 1);
+    resultRows.push([
+  visitId,      //1
+  dateObj,      //2
+  youbiRaw,     //3
+  staffId,      //4
+  staffName,    //5
+  pid,          //6
+  pname,        //7
+  area,         //8
+  start,        //9
+  end,          //10
+  svcMin,       //11
+  timeType,     //12
+  earliest,     //13
+  latest,       //14
+  note,         //15
+]);
+  });
+  // ◆ ここから：固定＆同じ開始時刻グループのルート最適化（時刻は変えずに並びだけ最短に）
+
+  // 配列の全順列を返すヘルパー（件数 6〜7 までなら十分実用範囲）
+  function generatePermutations(arr) {
+    var results = [];
+    function permute(prefix, remaining) {
+      if (remaining.length === 0) {
+        results.push(prefix);
+        return;
+      }
+      for (var i = 0; i < remaining.length; i++) {
+        var nextPrefix = prefix.concat([remaining[i]]);
+        var nextRemaining = remaining.slice(0, i).concat(remaining.slice(i + 1));
+        permute(nextPrefix, nextRemaining);
+      }
+    }
+    permute([], arr);
+    return results;
+  }
+
+  // staff_id → 拠点の緯度経度
+  var staffLocMap = {};
+  staffList.forEach(function (st) {
+    var lat = Number(st.lat);
+    var lng = Number(st.lng);
+    staffLocMap[st.id] = {
+      lat: isNaN(lat) ? null : lat,
+      lng: isNaN(lng) ? null : lng
+    };
+  });
+
+  // staffId|dateStr ごとに行インデックスを集める
+  var dayGroupMap = {};
+  for (var i = 0; i < resultRows.length; i++) {
+    var r = resultRows[i];
+    var d = r[1];   // 日付(Date)
+    var sId = r[3]; // staff_id
+    if (!sId || !(d instanceof Date)) continue;
+
+    var dStr = Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+    var key = sId + '|' + dStr;
+    if (!dayGroupMap[key]) dayGroupMap[key] = [];
+    dayGroupMap[key].push(i);
+  }
+
+  // 患者 index → {lat,lng} を取るヘルパー
+  function getPatientPosFromIndex(rowIndex) {
+    var row = resultRows[rowIndex];
+    var pid = row[5]; // patient_id
+    var pInfo = patientMap[pid] || {};
+    var lat = (pInfo.lat !== undefined && pInfo.lat !== '') ? Number(pInfo.lat) : null;
+    var lng = (pInfo.lng !== undefined && pInfo.lng !== '') ? Number(pInfo.lng) : null;
+    return { lat: lat, lng: lng };
+  }
+
+  // 各スタッフ×日ごとに、「同じ開始時刻 & 固定」のブロックを総当たりで最適化
+  Object.keys(dayGroupMap).forEach(function (key) {
+    var idxList = dayGroupMap[key];
+    if (idxList.length <= 1) return;
+
+    var parts = key.split('|');
+    var staffId = parts[0];
+    var staffLoc = staffLocMap[staffId] || { lat: null, lng: null };
+
+    // まず、その日の行インデックスを「開始時刻順＋元の行番号」で安定ソート
+    idxList.sort(function (aIdx, bIdx) {
+      var diff = toMinutes(resultRows[aIdx][8]) - toMinutes(resultRows[bIdx][8]);
+      if (diff !== 0) return diff;
+      return aIdx - bIdx;
+    });
+
+    var p = 0;
+    while (p < idxList.length) {
+      var baseIdx = idxList[p];
+      var baseRow = resultRows[baseIdx];
+      var timeType = baseRow[11]; // 時間タイプ
+
+      // 固定以外はここでは対象外（そのまま）
+      if (timeType !== '固定') {
+        p++;
+        continue;
+      }
+
+      var baseStartMin = toMinutes(baseRow[8]);
+
+      // 「同じ開始時刻 ＆ 時間タイプ＝固定」の連続ブロックを抽出
+      var group = [];
+      var q = p;
+      while (q < idxList.length) {
+        var idx2 = idxList[q];
+        var row2 = resultRows[idx2];
+        var tt2 = row2[11];
+        var sMin = toMinutes(row2[8]);
+
+        if (tt2 === '固定' && sMin === baseStartMin) {
+          group.push(idx2);
+          q++;
+        } else {
+          break;
+        }
+      }
+
+      // ブロックが1件だけなら並べ替え不要
+      if (group.length <= 1) {
+        p = q;
+        continue;
+      }
+
+      // ブロックの「前」と「後」の位置（拠点 or 他の訪問）を取得
+      var prevPos = null;
+      if (p === 0) {
+        // その日の最初のブロックなら拠点を起点に
+        if (staffLoc.lat != null && staffLoc.lng != null) {
+          prevPos = { lat: staffLoc.lat, lng: staffLoc.lng };
+        }
+      } else {
+        var prevIdx = idxList[p - 1];
+        prevPos = getPatientPosFromIndex(prevIdx);
+      }
+
+      var nextPos = null;
+      if (q < idxList.length) {
+        var nextIdx = idxList[q];
+        nextPos = getPatientPosFromIndex(nextIdx);
+      }
+
+      // このブロックがデカすぎると計算爆発するので、7件以上なら諦めて元の順番で
+      if (group.length >= 7) {
+        p = q;
+        continue;
+      }
+
+      // group（＝行インデックス）の全順列を生成
+      var permCandidates = generatePermutations(group);
+
+      // 「前→ブロック内→後」の総距離が最小になる順列を探す
+      var bestPerm = group.slice(); // デフォルトは元の順番
+      var bestCost = 1e15;
+
+      permCandidates.forEach(function (perm) {
+        var cost = 0;
+
+        // helper: 2点間距離（どちらか位置不明なら 0）
+        function addDist(posA, posB) {
+          if (!posA || !posB) return;
+          if (posA.lat == null || posA.lng == null || posB.lat == null || posB.lng == null) return;
+          var d = calcDistanceKm(posA.lat, posA.lng, posB.lat, posB.lng);
+          if (d && !isNaN(d)) cost += d;
+        }
+
+        // 前 → ブロック先頭
+        if (prevPos) {
+          var firstPos = getPatientPosFromIndex(perm[0]);
+          addDist(prevPos, firstPos);
+        }
+
+        // ブロック内
+        for (var i2 = 0; i2 < perm.length - 1; i2++) {
+          var posA = getPatientPosFromIndex(perm[i2]);
+          var posB = getPatientPosFromIndex(perm[i2 + 1]);
+          addDist(posA, posB);
+        }
+
+        // ブロック末尾 → 後
+        if (nextPos) {
+          var lastPos = getPatientPosFromIndex(perm[perm.length - 1]);
+          addDist(lastPos, nextPos);
+        }
+
+        if (cost < bestCost) {
+          bestCost = cost;
+          bestPerm = perm;
+        }
+      });
+
+      // ==== 並べ替えを resultRows に反映（開始時刻は変えない） ====
+      // group[i] の位置に、bestPerm[i] の行オブジェクトをコピーする
+      var rowMap = {};
+      group.forEach(function (idx) { rowMap[idx] = resultRows[idx]; });
+
+      for (var i3 = 0; i3 < group.length; i3++) {
+        var srcIdx = bestPerm[i3];  // この行を
+        var destIdx = group[i3];    // この位置に持ってくる
+        resultRows[destIdx] = rowMap[srcIdx];
+      }
+
+      // 次のブロックへ
+      p = q;
+    }
+  });
+
+  // ◆ ここまで：固定＆同じ開始時刻グループのルート最適化（時刻はそのまま）
+
+
+     // ◆ ここから：簡易ルート最適化（可動訪問だけ順番＆時刻を調整）
+
+  // staffId|dateStr ごとに訪問行を集める
+  var routeGroupMap = {};
+  for (var i = 0; i < resultRows.length; i++) {
+    var r = resultRows[i];
+    var d = r[1];      // 日付
+    var sId = r[3];    // staff_id
+    if (!(d instanceof Date) || !sId) continue;
+
+    var dStr = Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+    var key = sId + '|' + dStr;
+    if (!routeGroupMap[key]) routeGroupMap[key] = [];
+    routeGroupMap[key].push(i);
+  }
+
+  // 各スタッフ×日付ごとに、可動訪問の順番と時刻を調整
+  Object.keys(routeGroupMap).forEach(function(key){
+    var idxList = routeGroupMap[key];
+
+    // 固定と可動に分ける
+    var fixedIdx = [];
+    var flexIdx  = [];
+
+    idxList.forEach(function(idx){
+      var row = resultRows[idx];
+      var timeType = row[11];   // 時間タイプ
+      if (timeType === '固定') {
+        fixedIdx.push(idx);
+      } else {
+        flexIdx.push(idx);
+      }
+    });
+
+    // 可動訪問がなければ何もしない
+    if (flexIdx.length === 0) return;
+
+    // 固定訪問は開始時刻順に並べておく（アンカー）
+    fixedIdx.sort(function(aIdx, bIdx){
+      return toMinutes(resultRows[aIdx][8]) - toMinutes(resultRows[bIdx][8]);
+    });
+
+    // 近傍探索のスタート位置（緯度経度）を決める
+    var currentLat = null;
+    var currentLng = null;
+
+    if (fixedIdx.length > 0) {
+      // その日の最初の固定訪問を起点にする
+      var firstFixedIdx = fixedIdx[0];
+      var firstPid = resultRows[firstFixedIdx][5];
+      var firstP   = patientMap[firstPid] || {};
+      if (firstP.lat != null && firstP.lng != null) {
+        currentLat = firstP.lat;
+        currentLng = firstP.lng;
+      }
+    }
+
+    // 固定が1件もなく、起点座標がない場合は
+    // とりあえず最初の可動訪問の座標を起点にする
+    if (currentLat == null || currentLng == null) {
+      var firstFlexPid = resultRows[flexIdx[0]][5];
+      var firstFlexP   = patientMap[firstFlexPid] || {};
+      if (firstFlexP.lat != null && firstFlexP.lng != null) {
+        currentLat = firstFlexP.lat;
+        currentLng = firstFlexP.lng;
+      }
+    }
+
+    // 最近傍法で可動訪問を並べ替え
+    var remaining = flexIdx.slice();
+    var orderedFlex = [];
+
+    while (remaining.length > 0) {
+      var bestPos   = 0;
+      var bestDist  = 1e12;
+
+      for (var i = 0; i < remaining.length; i++) {
+        var idxVisit = remaining[i];
+        var pid = resultRows[idxVisit][5];
+        var p   = patientMap[pid] || {};
+
+        var dist;
+        if (currentLat == null || currentLng == null ||
+            p.lat == null || p.lng == null) {
+          // 座標がなければ距離0扱い（どれを先にしても同じとみなす）
+          dist = 0;
+        } else {
+          dist = calcDistanceKm(currentLat, currentLng, p.lat, p.lng) || 0;
+        }
+
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestPos  = i;
+        }
+      }
+
+      var chosenIdx = remaining.splice(bestPos, 1)[0];
+      orderedFlex.push(chosenIdx);
+
+      // 次の起点を更新
+      var cPid = resultRows[chosenIdx][5];
+      var cp   = patientMap[cPid] || {};
+      if (cp.lat != null && cp.lng != null) {
+        currentLat = cp.lat;
+        currentLng = cp.lng;
+      }
+    }
+
+    // 固定 → 並べ替え済み可動 の順に回る
+    var newOrder = fixedIdx.concat(orderedFlex);
+
+    // 時間窓に合わせて start/end を調整
+    var prevEndMin = null; // 直前訪問の終了時刻（分）
+
+    for (var k = 0; k < newOrder.length; k++) {
+      var idx = newOrder[k];
+      var row = resultRows[idx];
+
+      var timeType = row[11];       // 時間タイプ
+      var svcMin   = Number(row[10] || 0); // サービス時間（分）
+      if (!svcMin) svcMin = 0;
+
+      // 固定は時刻そのまま＆prevEndMin だけ更新
+      if (timeType === '固定') {
+        prevEndMin = toMinutes(row[9]); // 終了時刻
+        continue;
+      }
+
+      var earliestVal = row[12]; // 希望最早時刻
+      var latestVal   = row[13]; // 希望最遅時刻
+
+      var earliestMin = earliestVal ? toMinutes(earliestVal) : null;
+      var latestMin   = latestVal   ? toMinutes(latestVal)   : null;
+
+      // 基本は「最早時刻」から
+      var startMin = earliestMin != null ? earliestMin : toMinutes(row[8]);
+      if (startMin == null) startMin = prevEndMin;
+
+      // 直前訪問の終了時刻があれば、それ以降にずらす
+      if (prevEndMin != null && startMin != null) {
+        startMin = Math.max(prevEndMin, startMin);
+      }
+
+      // 窓の上限を超えていたら、とりあえず最早に戻す（簡易版）
+      if (latestMin != null && startMin > latestMin && earliestMin != null) {
+        startMin = earliestMin;
+      }
+
+      var endMin = startMin + svcMin;
+
+      // 分 → シートの時刻 number に戻す
+      row[8] = startMin / (24 * 60);  // 開始時刻
+      row[9] = endMin   / (24 * 60);  // 終了時刻
+
+      prevEndMin = endMin;
+    }
+  });
+
+  // ◆ ここまで：簡易ルート最適化
+
+    // ◆ ここから：ルート診断用の「前訪問→今訪問」の距離・時間を計算
+
+  var prevVisitIdArr = new Array(resultRows.length).fill('');
+  var moveKmArr      = new Array(resultRows.length).fill('');
+  var moveMinArr     = new Array(resultRows.length).fill('');
+
+  if (resultRows.length > 0) {
+    // staffId|dateStr ごとに行インデックスをまとめる
+    var staffDateMap = {}; // key = staffId|yyyy/MM/dd → [rowIndex...]
+
+    for (var i = 0; i < resultRows.length; i++) {
+      var r = resultRows[i];
+      var visitDate = r[1];   // 日付(Date)
+      var staffId   = r[3];   // staff_id
+      var pid       = r[5];   // patient_id
+
+      if (!staffId || !(visitDate instanceof Date) || !pid) continue;
+
+      var dateStr = Utilities.formatDate(visitDate, tz, 'yyyy/MM/dd');
+      var key = staffId + '|' + dateStr;
+      if (!staffDateMap[key]) staffDateMap[key] = [];
+      staffDateMap[key].push(i);
+    }
+
+    // 各スタッフ×日付ごとに、開始時刻順に並べて距離を計算
+    Object.keys(staffDateMap).forEach(function(key){
+      var indexList = staffDateMap[key];
+
+           // 開始時刻（列8）でソート（同時刻なら元の行番号順で安定）
+      indexList.sort(function(aIdx, bIdx){
+        var aStart = resultRows[aIdx][8]; // 開始時刻
+        var bStart = resultRows[bIdx][8];
+        var diff = toMinutes(aStart) - toMinutes(bStart);
+        if (diff !== 0) return diff;
+        return aIdx - bIdx;
+      });
+
+      for (var j = 0; j < indexList.length; j++) {
+        var currIndex = indexList[j];
+        if (j === 0) {
+          // その日の最初の訪問は前訪問なし
+          prevVisitIdArr[currIndex] = '';
+          moveKmArr[currIndex]      = '';
+          moveMinArr[currIndex]     = '';
+        } else {
+          var prevIndex = indexList[j - 1];
+
+          var prevRow = resultRows[prevIndex];
+          var currRow = resultRows[currIndex];
+
+          var prevPid = prevRow[5]; // patient_id
+          var currPid = currRow[5];
+
+          var prevP = patientMap[prevPid] || {};
+          var currP = patientMap[currPid] || {};
+
+          var lat1 = prevP.lat;
+          var lng1 = prevP.lng;
+          var lat2 = currP.lat;
+          var lng2 = currP.lng;
+
+          var distKm    = null;
+          var moveMin   = null;
+
+          if (lat1 != null && lng1 != null && lat2 != null && lng2 != null) {
+            distKm  = calcDistanceKm(lat1, lng1, lat2, lng2);
+            // 時速20km/h 前提で移動時間(分)をざっくり計算
+            moveMin = Math.round(distKm / 20 * 60);
+          }
+
+          prevVisitIdArr[currIndex] = prevRow[0];               // 前の visit_id
+          moveKmArr[currIndex]      = distKm != null ? distKm : '';
+          moveMinArr[currIndex]     = moveMin != null ? moveMin : '';
+        }
+      }
+    });
+  }
+  // ◆ ここまでルート診断用
+
+  // ◆ ここから：スタッフごとの1日内で「実際の開始・終了時刻」を自動調整
+
+  // staff_id + 日付ごとに行インデックスを集める
+  var dayStaffMap = {};
+  for (var i = 0; i < resultRows.length; i++) {
+    var r = resultRows[i];
+    var d   = r[1];  // 日付(Date)
+    var sId = r[3];  // staff_id
+    if (!sId || !(d instanceof Date)) continue;
+
+    var dStr = Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+    var key  = sId + '|' + dStr;
+    if (!dayStaffMap[key]) dayStaffMap[key] = [];
+    dayStaffMap[key].push(i);
+  }
+
+  // 各スタッフ×日ごとに、時間を前から順に詰める（階段状にする）
+  Object.keys(dayStaffMap).forEach(function(key) {
+    var idxList = dayStaffMap[key];
+
+    // その日の中での順番：開始時刻 ＋ 元の順番
+    idxList.sort(function(aIdx, bIdx) {
+      var ra = resultRows[aIdx];
+      var rb = resultRows[bIdx];
+      var diff = toMinutes(ra[8]) - toMinutes(rb[8]); // 開始時刻列
+      if (isNaN(diff)) diff = 0;
+      if (diff !== 0) return diff;
+      return aIdx - bIdx;
+    });
+
+    // このスタッフのこの日の「いま何時まで終わっているか」（分）
+    var currentEndMin = null;
+
+    idxList.forEach(function(rIdx) {
+      var row      = resultRows[rIdx];
+      var timeType = row[11];                  // 時間タイプ
+      var svcMin   = Number(row[10]) || 0;     // サービス時間(分)
+
+      // サービス時間が0なら無視
+      if (!svcMin) return;
+
+      // 希望最早・最遅
+      var earliestMin = row[12] ? toMinutes(row[12]) : null;
+      var latestMin   = row[13] ? toMinutes(row[13]) : null;
+
+      // さっき計算した「移動時間(分)」を使う
+      var moveMin = Number(moveMinArr[rIdx]) || 0;
+
+      // 「移動時間＋バッファ」
+      var gapMin = moveMin + EXTRA_BUFFER_MIN;
+
+      // --------------------
+      // 1) 固定 の扱い
+      // --------------------
+      if (timeType === '固定') {
+        // 「元の開始時刻」を基本として使う
+        var fixedStartMin = toMinutes(row[8]);
+
+        // 万一空なら、「今までの終了＋移動＋バッファ」か「最早」を使う
+        if (fixedStartMin == null) {
+          if (currentEndMin != null) {
+            fixedStartMin = currentEndMin + gapMin;
+          } else if (earliestMin != null) {
+            fixedStartMin = earliestMin;
+          }
+        }
+
+        var fixedEndMin = fixedStartMin + svcMin;
+
+        // シートは「1日=1.0」の数値形式なので /1440
+        row[8] = fixedStartMin / (24 * 60); // 開始時刻
+        row[9] = fixedEndMin   / (24 * 60); // 終了時刻
+
+        // 現在の終了時刻を更新
+        currentEndMin = fixedEndMin;
+        return;
+      }
+
+      // --------------------
+      // 2) 可動（時間帯／午前／午後／終日など）
+      // --------------------
+
+      // 基準となる開始候補：今入っている開始時刻 or 最早時刻
+      var baseStartMin = toMinutes(row[8]);
+      var startCandidate = baseStartMin != null
+        ? baseStartMin
+        : (earliestMin != null ? earliestMin : currentEndMin);
+
+      // 直前訪問の「終了＋移動＋バッファ」より前には入れない
+      if (currentEndMin != null) {
+        startCandidate = Math.max(startCandidate || 0, currentEndMin + gapMin);
+      }
+
+      // 最早時刻より前にはならないように
+      if (earliestMin != null) {
+        startCandidate = Math.max(startCandidate, earliestMin);
+      }
+
+      var startMin = startCandidate;
+      var endMin   = startMin + svcMin;
+
+      // 希望最遅（終了）を超えた場合は備考に警告
+      if (latestMin != null && endMin > latestMin) {
+        row[14] = (row[14] || '') + ' / 希望時間帯内に収まらない可能性あり';
+      }
+
+      row[8] = startMin / (24 * 60); // 開始
+      row[9] = endMin   / (24 * 60); // 終了
+
+      currentEndMin = endMin;
+    });
+  });
+
+  // ◆ ここまで：スタッフごとの1日内で「実際の開始・終了時刻」を自動調整
+
+    // ◆ 割当結果シートに書き込み
+  resultSheet.clear();
+    var header = [
+    'visit_id',
+    '日付',
+    '曜日',
+    'staff_id',
+    'スタッフ名',
+    'patient_id',
+    '患者名',
+    'エリア',
+    '開始時刻',
+    '終了時刻',
+    'サービス時間',
+    '時間タイプ',      // ★追加
+    '希望最早時刻',    // ★追加
+    '希望最遅時刻',    // ★追加
+    '備考',
+    '前訪問ID',
+    '移動距離(km)',
+    '移動時間(分)'
+  ];
+
+  resultSheet.getRange(1, 1, 1, header.length).setValues([header]);
+
+  if (resultRows.length > 0) {
+    var outRows = resultRows.map(function(r, i){
+      return r.concat([
+        prevVisitIdArr[i],
+        moveKmArr[i],
+        moveMinArr[i]
+      ]);
+    });
+    resultSheet.getRange(2, 1, outRows.length, header.length).setValues(outRows);
+  }
+
+    // ◆ 訪問履歴シートへ追加（蓄積）
+  if (resultRows.length > 0) {
+    var lastRow = historySheet.getLastRow();
+
+    // 履歴シートには 12列（visit_id〜備考）だけ保存する
+    var histRows = resultRows.map(function(r) {
+      return [
+        r[0],  // visit_id
+        r[1],  // 日付
+        r[2],  // 曜日
+        r[3],  // staff_id
+        r[4],  // スタッフ名
+        r[5],  // patient_id
+        r[6],  // 患者名
+        r[7],  // エリア
+        r[8],  // 開始時刻
+        r[9],  // 終了時刻
+        r[10], // サービス時間
+        r[14]  // 備考（timeType, earliest, latest を飛ばして index 14）
+      ];
+    });
+
+    historySheet
+      .getRange(lastRow + 1, 1, histRows.length, 12)
+      .setValues(histRows);
+  }
+
+
+  SpreadsheetApp.getUi().alert('割当結果を ' + resultRows.length + ' 件作成しました。');
+}
+
+function 週間リクエストを生成() {
+  const ss = SpreadsheetApp.getActive();
+  const tz = ss.getSpreadsheetTimeZone();
+
+  const patientSheet = ss.getSheetByName('患者マスタ');
+  const regularSheet = ss.getSheetByName('定期リクエスト'); // 未使用でもOK
+  const weeklySheet  = ss.getSheetByName('週間リクエスト');
+  const changeSheet  = ss.getSheetByName('個別変更リクエスト'); // B用
+  const assignSheet  = ss.getSheetByName('割当結果');            // C用（前回担当） 
+  const historySheet = ss.getSheetByName('訪問履歴');           // 訪問履歴から前回担当
+
+  if (!patientSheet || !regularSheet || !changeSheet || !weeklySheet) {
+    SpreadsheetApp.getUi().alert(
+      '患者マスタ / 定期リクエスト / 個別変更リクエスト / 週間リクエスト のシート名を確認してください。'
+    );
+    return;
+  }
+
+  // ◆ 患者マスタ読み込み
+  const pValues = patientSheet.getDataRange().getValues();
+  if (pValues.length <= 1) {
+    SpreadsheetApp.getUi().alert('「患者マスタ」にデータがありません。');
+    return;
+  }
+  const pHeader = pValues[0];
+  const pData   = pValues.slice(1);
+
+  // ◆ 必須ヘッダー一覧
+  const requiredHeaders = [
+    'patient_id',
+    '患者名',
+    'エリア',
+    '週訪問回数',
+    '希望曜日（複数可）',
+    '希望時間帯（開始）',
+    '希望時間帯（終了）',
+    '曜日NG',
+    '性別制限',
+    '継続希望',
+    'サービス時間',
+    '備考'
+  ];
+
+  // ◆ 患者マスタのヘッダー位置確認
+  const idx = {};
+  const missing = [];
+  requiredHeaders.forEach(h => {
+    const i = pHeader.indexOf(h);
+    if (i === -1) {
+      missing.push(h);
+    } else {
+      idx[h] = i;
+    }
+  });
+
+  if (missing.length > 0) {
+    SpreadsheetApp.getUi().alert(
+      '患者マスタのヘッダーが足りません：\n' + missing.join('\n')
+    );
+    return;
+  }
+
+  // 「時間タイプ」列はあれば使う・無ければ無視（エラーにならないように）
+  const timeTypeColIndex = pHeader.indexOf('時間タイプ');
+
+  // ◆ 患者ごとの基本情報
+  const patientInfoMap = {};
+  pData.forEach(row => {
+    const pid = row[idx['patient_id']];
+    if (!pid) return;
+
+    patientInfoMap[pid] = {
+      name     : row[idx['患者名']] || '',
+      area     : row[idx['エリア']] || '',
+      svcMin   : row[idx['サービス時間']],
+      sexLimit : row[idx['性別制限']],
+      contPref : row[idx['継続希望']],
+      timeType : (timeTypeColIndex >= 0 ? row[timeTypeColIndex] : '') || '',
+      startPref: row[idx['希望時間帯（開始）']],
+      endPref  : row[idx['希望時間帯（終了）']],
+      note     : row[idx['備考']] || ''
+    };
+  });
+
+  // ◆ 今週の月曜〜日曜を算出
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const day = today.getDay();        // 日=0, 月=1, …
+  const diffToMonday = (day + 6) % 7;
+  const weekStart = new Date(today);
+  weekStart.setDate(today.getDate() - diffToMonday);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+
+  const weekStartStr = Utilities.formatDate(weekStart, tz, 'yyyy/MM/dd');
+  const weekEndStr   = Utilities.formatDate(weekEnd,   tz, 'yyyy/MM/dd');
+
+  // ◆ 訪問履歴から「患者ごとの直近の前回担当」を作る（今週より前のみ）
+  const lastVisitMap = {}; // patient_id → {date: Date, staffId, staffName}
+
+  if (historySheet) {
+    const hValues = historySheet.getDataRange().getValues();
+    if (hValues.length > 1) {
+      const hHeader = hValues[0];
+      const hData   = hValues.slice(1);
+
+      const hIdxDate  = hHeader.indexOf('日付');
+      const hIdxPid   = hHeader.indexOf('patient_id');
+      const hIdxStaff = hHeader.indexOf('staff_id');
+      const hIdxName  = hHeader.indexOf('スタッフ名');
+
+      hData.forEach(row => {
+        const d   = row[hIdxDate];
+        const pid = row[hIdxPid];
+        if (!pid || !(d instanceof Date)) return;
+
+        const ds = Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+        // 今週以降は「前回」にしない
+        if (ds >= weekStartStr) return;
+
+        const current = lastVisitMap[pid];
+        if (!current || d > current.date) {
+          lastVisitMap[pid] = {
+            date: d,
+            staffId  : row[hIdxStaff] || '',
+            staffName: row[hIdxName]  || ''
+          };
+        }
+      });
+    }
+  }
+
+  // ◆ 曜日マッピング
+  const youbiMap = {
+    'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3,
+    'Thu': 4, 'Fri': 5, 'Sat': 6
+  };
+  const jpToEn = {
+    '日':'Sun','月':'Mon','火':'Tue','水':'Wed','木':'Thu','金':'Fri','土':'Sat'
+  };
+  const indexToYoubi = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+  function parseDays(str) {
+  if (!str) return [];
+  const parts = String(str)
+    .split(/[,\u3001\/・\s]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const out = [];
+  parts.forEach(p => {
+    const y = normalizeYoubi(p);  // ここで共通の正規化
+    if (y && out.indexOf(y) === -1) out.push(y);
+  });
+  return out;
+}
+
+  // ★ 時刻を「分」に変換する共通関数
+  function toMinutes(v) {
+    if (!v && v !== 0) return null;
+
+    if (v instanceof Date) {
+      return v.getHours() * 60 + v.getMinutes();
+    }
+    if (typeof v === 'number') {
+      return Math.round(v * 24 * 60); // 1日=1.0 の小数
+    }
+    if (typeof v === 'string') {
+      const parts = v.split(':');
+      if (parts.length >= 2) {
+        const h = Number(parts[0]);
+        const m = Number(parts[1]);
+        return h * 60 + m;
+      }
+    }
+    return null;
+  }
+
+  // ★ start時刻 + 分数 → 終了時刻
+  function calcEndTime(startValue, minutes) {
+    const m = Number(minutes || 0);
+    if (!startValue || !m) return startValue;
+
+    if (typeof startValue === 'number') {
+      return startValue + m / (24 * 60);
+    } else if (startValue instanceof Date) {
+      return new Date(startValue.getTime() + m * 60 * 1000);
+    } else {
+      return startValue;
+    }
+  }
+
+  // ★ h,m → シート用の時刻数値(1日=1.0)
+  function makeTimeValue(h, m) {
+    return (h * 60 + m) / (24 * 60);
+  }
+
+  // ★ 時間タイプを推論する
+  function inferTimeType(timeTypeRaw, startPref, endPref, svcMin) {
+    let t = (timeTypeRaw || '').trim();
+    if (t) return t;  // すでにセルに入っているならそれを尊重
+
+    // 幅情報が無い → 固定扱い
+    if (!startPref || !endPref) return '固定';
+
+    const s = toMinutes(startPref);
+    const e = toMinutes(endPref);
+    if (s == null || e == null) return '固定';
+
+    const span = e - s;               // 幅（分）
+    const svc  = Number(svcMin || 0); // サービス時間（分）
+
+    // サービス時間 ≒ 幅 → 実質「固定」
+    if (!svc || span <= svc + 5) return '固定';
+
+    // 午前 9:00〜12:00 っぽい
+    if (s <= 9 * 60 + 15 && e >= 12 * 60 - 15) return '午前';
+
+    // 午後 13:00〜16:00 っぽい
+    if (s >= 13 * 60 - 15 && e <= 16 * 60 + 15) return '午後';
+
+    // 終日クラス（例：9〜17 など幅が長い）
+    if (span >= 7 * 60) return '終日';
+
+    // それ以外 → 「時間帯」（9〜11の間に、など）
+    return '時間帯';
+  }
+
+  // ★ 時間タイプごとの開始/終了＋希望最早/最遅を決める
+  function makeTimeWindow(timeTypeRaw, startPref, endPref, svcMin) {
+    const t = inferTimeType(timeTypeRaw, startPref, endPref, svcMin);
+
+    let start    = startPref;
+    let end      = endPref;
+    let earliest = null;
+    let latest   = null;
+
+    if (t === '固定') {
+      if (!end && start && svcMin) {
+        end = calcEndTime(start, svcMin);
+      }
+      earliest = start;
+      latest   = end;
+
+    } else if (t === '時間帯') {
+      earliest = startPref;
+      latest   = endPref;
+
+      if (!start && earliest) start = earliest;
+      if (!end && start && svcMin) end = calcEndTime(start, svcMin);
+
+    } else if (t === '午前') {
+      earliest = makeTimeValue(9, 0);
+      latest   = makeTimeValue(12, 0);
+      if (!start) start = earliest;
+      if (!end && start && svcMin) end = calcEndTime(start, svcMin);
+
+    } else if (t === '午後') {
+      earliest = makeTimeValue(13, 0);
+      latest   = makeTimeValue(17, 0);
+      if (!start) start = earliest;
+      if (!end && start && svcMin) end = calcEndTime(start, svcMin);
+
+    } else if (t === '終日') {
+      earliest = makeTimeValue(9, 0);
+      latest   = makeTimeValue(18, 0);
+      if (!start) start = earliest;
+      if (!end && start && svcMin) end = calcEndTime(start, svcMin);
+
+    } else {
+      // 想定外は一応固定扱い
+      if (!end && start && svcMin) {
+        end = calcEndTime(start, svcMin);
+      }
+      earliest = start;
+      latest   = end;
+    }
+
+    return { start, end, earliest, latest, timeType: t };
+  }
+
+  // ============================
+  // ★ A：週訪問回数から週間リクエスト生成
+  // ============================
+  const weeklyRequests = [];
+
+  pData.forEach(row => {
+    const pid = row[idx['patient_id']];
+    if (!pid) return;
+
+    const info   = patientInfoMap[pid] || {};
+    const visits = Number(row[idx['週訪問回数']] || 0);
+    if (!visits || visits <= 0) return;
+
+    let prefDays = parseDays(row[idx['希望曜日（複数可）']]);
+    const ngDays = parseDays(row[idx['曜日NG']]);
+
+    if (prefDays.length === 0) {
+      prefDays = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    }
+    const candidates = prefDays.filter(d => !ngDays.includes(d));
+    if (candidates.length === 0) return;
+
+    const actualVisits = Math.min(visits, candidates.length);
+
+    const svcMin      = info.svcMin;
+    const startPref   = info.startPref;
+    const endPref     = info.endPref;
+    const timeTypeRaw = info.timeType;
+
+    const win = makeTimeWindow(timeTypeRaw, startPref, endPref, svcMin);
+
+    const sexLimit = info.sexLimit;
+    const contPref = info.contPref;
+    const note     = info.note || '';
+
+    candidates.sort((a, b) => youbiMap[a] - youbiMap[b]);
+
+    for (let i = 0; i < actualVisits; i++) {
+      const youbi = candidates[i];
+      const targetDay = youbiMap[youbi];
+
+      for (let d = 0; d < 7; d++) {
+        const dateObj = new Date(weekStart);
+        dateObj.setDate(weekStart.getDate() + d);
+
+        if (dateObj.getDay() === targetDay) {
+          const dateStr    = Utilities.formatDate(dateObj, tz, 'yyyy/MM/dd');
+          const weekdayStr = Utilities.formatDate(dateObj, tz, 'EEE');
+
+          const last = lastVisitMap[pid] || {};
+
+          weeklyRequests.push({
+            date        : dateObj,
+            dateStr     : dateStr,
+            weekdayStr  : weekdayStr,
+            patient_id  : pid,
+            patient_name: info.name || '',
+            area        : info.area || '',
+            start       : win.start,
+            end         : win.end,
+            svcMin      : svcMin,
+            sexLimit    : sexLimit,
+            contPref    : contPref,
+            changeType  : '通常',
+            prevStaffId   : last.staffId   || '',
+            prevStaffName : last.staffName || '',
+            prevDate      : last.date      || '',
+            timeType      : win.timeType,
+            earliest      : win.earliest,
+            latest        : win.latest,
+            note          : note
+          });
+
+          break; // その曜日は今週1回だけ
+        }
+      }
+    }
+  });
+
+  // ============================
+  // ★ B：個別変更リクエストの適用
+  // ============================
+  if (changeSheet) {
+    const cValues = changeSheet.getDataRange().getValues();
+    if (cValues.length > 1) {
+      const cHeader = cValues[0];
+      const cData   = cValues.slice(1);
+
+      const cIdx = {
+        change_id : cHeader.indexOf('change_id'),
+        patient_id: cHeader.indexOf('patient_id'),
+        name      : cHeader.indexOf('患者名'),
+        date      : cHeader.indexOf('日付'),
+        op        : cHeader.indexOf('操作（キャンセル/時間変更/追加）'),
+        newStart  : cHeader.indexOf('新開始時刻'),
+        newEnd    : cHeader.indexOf('新終了時刻'),
+        note      : cHeader.indexOf('備考'),
+        regAt     : cHeader.indexOf('登録日時')
+      };
+
+      const changeMap = {}; // key = pid|yyyy/MM/dd
+
+      cData.forEach((row, idxRow) => {
+        const pid = row[cIdx.patient_id];
+        const op  = row[cIdx.op];
+        const d   = row[cIdx.date];
+
+        if (!pid || !op || !(d instanceof Date)) return;
+
+        const dateStr = Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+        if (dateStr < weekStartStr || dateStr > weekEndStr) return;
+
+        const key = pid + '|' + dateStr;
+
+        let sortKey;
+        if (cIdx.regAt !== -1 && row[cIdx.regAt] instanceof Date) {
+          sortKey = row[cIdx.regAt].getTime();
+        } else {
+          sortKey = idxRow;
+        }
+
+        const change = {
+          pid,
+          op,
+          date    : d,
+          dateStr : dateStr,
+          newStart: row[cIdx.newStart],
+          newEnd  : row[cIdx.newEnd],
+          note    : row[cIdx.note],
+          patient_name: row[cIdx.name],
+          sortKey
+        };
+
+        if (!changeMap[key] || sortKey > changeMap[key].sortKey) {
+          changeMap[key] = change;
+        }
+      });
+
+      // 変更適用
+      Object.keys(changeMap).forEach(key => {
+        const ch = changeMap[key];
+        const matches = weeklyRequests.filter(req =>
+          req.patient_id === ch.pid && req.dateStr === ch.dateStr
+        );
+
+        if (ch.op === 'キャンセル') {
+          if (matches.length > 0) {
+            matches.forEach(req => {
+              req.changeType = 'キャンセル';
+              if (ch.note) req.note = ch.note;
+            });
+          }
+
+        } else if (ch.op === '時間変更') {
+          if (matches.length > 0) {
+            matches.forEach(req => {
+              if (ch.newStart) req.start = ch.newStart;
+
+              let endTime = ch.newEnd;
+              if (!endTime && ch.newStart) {
+                endTime = calcEndTime(ch.newStart, req.svcMin);
+              }
+              if (endTime) req.end = endTime;
+
+              req.changeType = '変更';
+              if (ch.note) req.note = ch.note;
+            });
+          }
+
+        } else if (ch.op === '追加') {
+          const baseInfo   = patientInfoMap[ch.pid] || {};
+          const weekdayStr = indexToYoubi[ch.date.getDay()];
+
+          let startTime = ch.newStart || baseInfo.startPref;
+          let endTime   = ch.newEnd   || baseInfo.endPref;
+          const svcMin  = baseInfo.svcMin || '';
+
+          const timeTypeRaw = baseInfo.timeType;
+
+          const win = makeTimeWindow(timeTypeRaw, startTime, endTime, svcMin);
+
+          weeklyRequests.push({
+            date        : ch.date,
+            dateStr     : ch.dateStr,
+            weekdayStr  : weekdayStr,
+            patient_id  : ch.pid,
+            patient_name: ch.patient_name || baseInfo.name || '',
+            area        : baseInfo.area || '',
+            start       : win.start,
+            end         : win.end,
+            svcMin      : svcMin,
+            sexLimit    : baseInfo.sexLimit || '',
+            contPref    : baseInfo.contPref || '',
+            changeType  : '追加',
+            note        : ch.note || baseInfo.note || '',
+            prevStaffId   : '',
+            prevStaffName : '',
+            prevDate      : null,
+            timeType      : win.timeType,
+            earliest      : win.earliest,
+            latest        : win.latest
+          });
+        }
+      });
+    }
+  }
+
+  // ============================
+  // ★ C：割当結果から「曜日別の前回担当」を付与
+  // ============================
+  const lastAssignMap = {}; // key = pid|dow → {staffId, staffName, date}
+
+  if (assignSheet) {
+    const aValues = assignSheet.getDataRange().getValues();
+    if (aValues.length > 1) {
+      const aHeader = aValues[0];
+      const aData   = aValues.slice(1);
+
+      const aIdxDate  = aHeader.indexOf('日付');
+      const aIdxPid   = aHeader.indexOf('patient_id');
+      const aIdxSid   = aHeader.indexOf('staff_id');
+      const aIdxSname = aHeader.indexOf('スタッフ名');
+
+      aData.forEach(row => {
+        const d   = row[aIdxDate];
+        const pid = row[aIdxPid];
+        if (!(d instanceof Date) || !pid) return;
+        if (d >= weekStart) return; // 今週より前だけ
+
+        const dow = d.getDay(); // 0〜6
+        const key = pid + '|' + dow;
+        const current = lastAssignMap[key];
+
+        if (!current || d > current.date) {
+          lastAssignMap[key] = {
+            staffId  : row[aIdxSid],
+            staffName: row[aIdxSname],
+            date     : d
+          };
+        }
+      });
+    }
+  }
+
+  weeklyRequests.forEach(req => {
+    const dow = req.date.getDay();
+    const key = req.patient_id + '|' + dow;
+    const last = lastAssignMap[key];
+    if (last) {
+      req.prevStaffId   = last.staffId || '';
+      req.prevStaffName = last.staffName || '';
+      req.prevDate      = last.date || null;
+    }
+  });
+
+  // ============================
+  // ◆ 出力チェック＆ソート
+  // ============================
+  if (weeklyRequests.length === 0) {
+    SpreadsheetApp.getUi().alert(
+      '週間リクエスト候補が0件でした。\n' +
+      '・「週訪問回数」が0または空ではないか\n' +
+      '・「希望曜日」と「曜日NG」の組み合わせで候補が消えていないか\n' +
+      '・今週の範囲（' + weekStartStr + '〜' + weekEndStr + '）でよいか\n' +
+      'などを確認してください。'
+    );
+    return;
+  }
+
+  weeklyRequests.sort((a, b) => {
+    if (a.date - b.date !== 0) return a.date - b.date;
+
+    const am = toMinutes(a.start);
+    const bm = toMinutes(b.start);
+    if (am == null && bm == null) return 0;
+    if (am == null) return 1;
+    if (bm == null) return -1;
+    return am - bm;
+  });
+
+  // ============================
+  // ◆ シートへ反映
+  // ============================
+  weeklySheet.clear();
+  const headerOut = [
+    'request_id',
+    '日付',
+    '曜日',
+    'patient_id',
+    '患者名',
+    'エリア',
+    '開始時刻',
+    '終了時刻',
+    'サービス時間',
+    '性別制限',
+    '継続希望',
+    '変更区分（通常/変更/追加/キャンセル）',
+    '前回担当スタッフID',
+    '前回担当スタッフ名',
+    '前回訪問日',
+    '時間タイプ',
+    '希望最早時刻',
+    '希望最遅時刻',
+    '備考'
+  ];
+  weeklySheet
+    .getRange(1, 1, 1, headerOut.length)
+    .setValues([headerOut]);
+
+  const out = weeklyRequests.map((req, i) => ([
+    'R' + Utilities.formatString('%03d', i+1),
+    req.date,
+    req.weekdayStr,
+    req.patient_id,
+    req.patient_name,
+    req.area,
+    req.start,
+    req.end,
+    req.svcMin,
+    req.sexLimit,
+    req.contPref,
+    req.changeType,
+    req.prevStaffId   || '',
+    req.prevStaffName || '',
+    req.prevDate      || '',
+    req.timeType      || '',
+    req.earliest      || '',
+    req.latest        || '',
+    req.note
+  ]));
+
+  weeklySheet.getRange(2, 1, out.length, headerOut.length).setValues(out);
+
+  SpreadsheetApp.getUi().alert(
+    '週間リクエストを ' +
+    weekStartStr +
+    ' 〜 ' +
+    weekEndStr +
+    ' 分、' +
+    weeklyRequests.length +
+    ' 件生成しました（前回担当＋時間タイプ対応）。'
+  );
+}
+
+
+function 位置情報を更新() {
+  const ss = SpreadsheetApp.getActive();
+  const tz = ss.getSpreadsheetTimeZone();
+
+  updateSheetLatLng_(ss.getSheetByName('患者マスタ'), '住所', '緯度', '経度');
+  updateSheetLatLng_(ss.getSheetByName('スタッフマスタ'), '拠点住所', '緯度', '経度');
+
+  SpreadsheetApp.getUi().alert('患者・スタッフの緯度経度を更新しました。');
+}
+
+function updateSheetLatLng_(sheet, addrHeader, latHeader, lngHeader) {
+  if (!sheet) return;
+
+  const values = sheet.getDataRange().getValues();
+  if (values.length <= 1) return;
+
+  const header = values[0];
+  const data   = values.slice(1);
+
+  const idxAddr = header.indexOf(addrHeader);
+  const idxLat  = header.indexOf(latHeader);
+  const idxLng  = header.indexOf(lngHeader);
+
+  if (idxAddr === -1 || idxLat === -1 || idxLng === -1) return;
+
+  const geocoder = Maps.newGeocoder();
+  let changed = false;
+
+  data.forEach((row, i) => {
+    const addr = row[idxAddr];
+    const lat  = row[idxLat];
+    const lng  = row[idxLng];
+
+    // 住所あり＆まだ緯度経度が空の行だけ処理
+    if (addr && (lat === '' || lng === '' || lat == null || lng == null)) {
+      const res = geocoder.geocode(addr);
+      if (res.status === 'OK' && res.results && res.results.length > 0) {
+        const loc = res.results[0].geometry.location;
+        data[i][idxLat] = loc.lat;
+        data[i][idxLng] = loc.lng;
+        changed = true;
+      }
+      Utilities.sleep(200); // 呼び出し制限のため少し待つ（安全策）
+    }
+  });
+
+  if (changed) {
+    sheet.getRange(2, 1, data.length, header.length).setValues(data);
+  }
+}
+function ルートサマリを作成() {
+  const ss = SpreadsheetApp.getActive();
+  const tz = ss.getSpreadsheetTimeZone();
+
+  const resultSheet  = ss.getSheetByName('割当結果');   // 割当結果
+  const patientSheet = ss.getSheetByName('患者マスタ'); // 患者マスタ
+
+  if (!resultSheet) {
+    SpreadsheetApp.getUi().alert('「割当結果」シートが見つかりません。');
+    return;
+  }
+  if (!patientSheet) {
+    SpreadsheetApp.getUi().alert('「患者マスタ」シートが見つかりません。');
+    return;
+  }
+
+  // ▼ 患者マスタを patient_id → {addr, lat, lng} にマッピング
+  const pValues = patientSheet.getDataRange().getValues();
+  const pHeader = pValues[0];
+  const pIdx = {
+    pid : pHeader.indexOf('patient_id'),
+    addr: pHeader.indexOf('住所'),
+    lat : pHeader.indexOf('緯度'),
+    lng : pHeader.indexOf('経度')
+  };
+  if (pIdx.pid === -1 || pIdx.addr === -1 || pIdx.lat === -1 || pIdx.lng === -1) {
+    SpreadsheetApp.getUi().alert('「患者マスタ」のヘッダー名（patient_id, 住所, 緯度, 経度）を確認してください。');
+    return;
+  }
+
+  const patientMap = {};
+  for (let i = 1; i < pValues.length; i++) {
+    const row = pValues[i];
+    const pid = row[pIdx.pid];
+    if (!pid) continue;
+    patientMap[pid] = {
+      addr: row[pIdx.addr] || '',
+      lat : row[pIdx.lat]  || '',
+      lng : row[pIdx.lng]  || ''
+    };
+  }
+
+  // ▼ 割当結果の読み込み
+  const values = resultSheet.getDataRange().getValues();
+  if (values.length <= 1) {
+    SpreadsheetApp.getUi().alert('「割当結果」にデータがありません。');
+    return;
+  }
+
+  const header = values[0];
+  const data   = values.slice(1);
+
+  const idx = {
+    date   : header.indexOf('日付'),
+    youbi  : header.indexOf('曜日'),
+    staffId: header.indexOf('staff_id'),
+    sname  : header.indexOf('スタッフ名'),
+    dist   : header.indexOf('移動距離(km)'),
+    mtime  : header.indexOf('移動時間(分)'),
+    pid    : header.indexOf('patient_id'),
+    pname  : header.indexOf('患者名'),
+    start  : header.indexOf('開始時刻')
+  };
+
+  if (idx.date === -1 || idx.staffId === -1 || idx.sname === -1 ||
+      idx.dist === -1 || idx.mtime === -1 ||
+      idx.pid === -1  || idx.pname === -1 || idx.start === -1) {
+    SpreadsheetApp.getUi().alert(
+      '「割当結果」のヘッダー名（staff_id, スタッフ名, 日付, 曜日, patient_id, 患者名, 開始時刻, 移動距離(km), 移動時間(分)）を確認してください。'
+    );
+    return;
+  }
+
+  // ◆ 集計用マップ: key = staffId|yyyy/MM/dd
+  const map = {};
+
+  data.forEach(row => {
+    const d = row[idx.date];
+    if (!(d instanceof Date)) return;
+
+    const staffId   = row[idx.staffId];
+    const staffName = row[idx.sname];
+    if (!staffId) return;
+
+    const dateStr = Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+    const youbi   = row[idx.youbi];
+    const distKm  = Number(row[idx.dist]  || 0);
+    const moveMin = Number(row[idx.mtime] || 0);
+
+    const key = staffId + '|' + dateStr;
+
+    if (!map[key]) {
+      map[key] = {
+        staffId,
+        staffName,
+        dateObj: d,
+        dateStr,
+        youbi,
+        visitCount: 0,
+        moveCount : 0,   // 前訪問ありの件数
+        distTotal : 0,
+        timeTotal : 0,
+        visits    : []   // この日このスタッフの訪問一覧
+      };
+    }
+
+    const rec = map[key];
+    rec.visitCount++;
+
+    if (distKm > 0 || moveMin > 0) {
+      rec.moveCount++;
+      rec.distTotal += distKm;
+      rec.timeTotal += moveMin;
+    }
+
+    // 訪問順作成用に保存
+    rec.visits.push({
+      start: row[idx.start],     // 開始時刻
+      pid  : row[idx.pid],
+      pname: row[idx.pname]
+    });
+  });
+
+  // ◆ 出力用配列に変換＆並べ替え
+  const records = Object.keys(map).map(k => map[k]);
+
+  records.sort((a, b) => {
+    if (a.staffName !== b.staffName) {
+      return a.staffName > b.staffName ? 1 : -1;
+    }
+    return a.dateObj - b.dateObj;
+  });
+
+  // ◆ 出力シートを用意
+  let summarySheet = ss.getSheetByName('ルートサマリ');
+  if (!summarySheet) {
+    summarySheet = ss.insertSheet('ルートサマリ');
+  }
+  summarySheet.clear();
+
+  const outHeader = [
+    'staff_id',
+    'スタッフ名',
+    '日付',
+    '曜日',
+    '訪問件数',
+    '移動回数（前訪問あり）',
+    '総移動距離(km)',
+    '総移動時間(分)',
+    'ルート順（No. 患者ID 患者名 住所 (緯度, 経度)）'
+  ];
+  summarySheet.getRange(1, 1, 1, outHeader.length).setValues([outHeader]);
+
+  if (records.length > 0) {
+    const out = records.map(r => {
+      // 開始時刻順で並べ替え
+      const visits = r.visits.slice().sort((a, b) => {
+        if (!a.start && !b.start) return 0;
+        if (!a.start) return 1;
+        if (!b.start) return -1;
+        return a.start - b.start;
+      });
+
+      // No.1 … → No.2 … の文字列を作成
+      const routeText = visits.map((v, idx) => {
+        const p = patientMap[v.pid] || {};
+        const addr = p.addr || '';
+        const lat  = p.lat  || '';
+        const lng  = p.lng  || '';
+        return 'No.' + (idx + 1) + ' ' +
+               v.pid + ' ' + v.pname + ' ' +
+               addr + ' (' + lat + ', ' + lng + ')';
+      }).join(' → ');
+
+      return [
+        r.staffId,
+        r.staffName,
+        r.dateObj,
+        r.youbi,
+        r.visitCount,
+        r.moveCount,
+        r.distTotal,
+        r.timeTotal,
+        routeText
+      ];
+    });
+
+    summarySheet.getRange(2, 1, out.length, outHeader.length).setValues(out);
+  }
+
+  SpreadsheetApp.getUi().alert('ルートサマリを ' + records.length + ' 行作成しました。');
+}
+
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+
+  ui.createMenu('スケジュール更新')
+    .addItem('週間リクエストを生成', '週間リクエストを生成')
+    .addItem('割当結果を作成',       '割当結果を作成')
+    .addItem('週ビューを更新',       '週ビューを更新')
+    .addSeparator()
+    .addItem('ルートサマリを作成',   'ルートサマリを作成')   // ★ここを追加
+    .addItem('位置情報を更新',       '位置情報を更新')
+    .addToUi();
+}
+
+
+
+
+
+
