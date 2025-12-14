@@ -35,6 +35,11 @@ function normalizeYoubi(y) {
   return null;
 }
 
+function parseIdList(str) {
+  if (!str) return [];
+  return String(str).split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s; });
+}
+
 function 週ビューを更新() {
   const ss = SpreadsheetApp.getActive();
   const resultSheet  = ss.getSheetByName('割当結果');
@@ -333,7 +338,11 @@ function distToScore(km) {
     timeType  : wHeader.indexOf('時間タイプ'),     // ★追加
     earliest  : wHeader.indexOf('希望最早時刻'),   // ★追加
     latest    : wHeader.indexOf('希望最遅時刻'),   // ★追加
-    note      : wHeader.indexOf('備考')
+    note      : wHeader.indexOf('備考'),
+    needStaff : wHeader.indexOf('必要スタッフ数'),
+    specifiedIds : wHeader.indexOf('指定スタッフID'),
+    specifiedType: wHeader.indexOf('指定タイプ'),
+    ngStaffIds   : wHeader.indexOf('NGスタッフID')
   };
 
     var patientSheet = ss.getSheetByName('患者マスタ');
@@ -414,6 +423,34 @@ pData.forEach(function(row){
       if (y && out.indexOf(y) === -1) out.push(y);
     });
     return out;
+  }
+
+  function applyStaffPreference(candidates, specifiedIdsArr, specifiedType, ngIdsArr) {
+    var ngSet = {};
+    ngIdsArr.forEach(function(id){ if (id) ngSet[id] = true; });
+    candidates = candidates.filter(function(c){ return !ngSet[c.staff.id]; });
+
+    if (!specifiedType || specifiedIdsArr.length === 0) return candidates;
+
+    var specSet = {};
+    specifiedIdsArr.forEach(function(id){ if (id) specSet[id] = true; });
+
+    if (specifiedType === '必須') {
+      return candidates.filter(function(c){ return specSet[c.staff.id]; });
+    }
+
+    if (specifiedType === '優先') {
+      candidates.forEach(function(c){
+        c._pref = specSet[c.staff.id] ? 1 : 0;
+      });
+      candidates.sort(function(a,b){
+        if (a._pref !== b._pref) return b._pref - a._pref;
+        return 0;
+      });
+      return candidates;
+    }
+
+    return candidates;
   }
 
   function toMinutes(v) {
@@ -563,6 +600,17 @@ if (!svcMin) svcMin = 0;
     var earliest = row[wIdx.earliest];   // ★追加
     var latest   = row[wIdx.latest];     // ★追加
 
+    var specifiedIdsArr = [];
+    var specifiedType = '';
+    var ngIdsArr = [];
+
+    if (wIdx.specifiedIds >= 0) specifiedIdsArr = parseIdList(row[wIdx.specifiedIds]);
+    if (wIdx.specifiedType >= 0) specifiedType = String(row[wIdx.specifiedType] || '').trim();
+    if (wIdx.ngStaffIds >= 0)   ngIdsArr = parseIdList(row[wIdx.ngStaffIds]);
+
+    var ngSet = {};
+    ngIdsArr.forEach(function(id){ if (id) ngSet[id] = true; });
+
 
     var startMin = toMinutes(start);
     var endMin   = toMinutes(end);
@@ -623,178 +671,196 @@ if (!svcMin) svcMin = 0;
 
 
 
-    var chosenStaff = null;
-    var chosenPreferArea = false;
-
-    // ◆ 継続希望＝同じ人希望 の場合、前回担当を最優先
-    if (contPref === '同じ人希望' && prevSid) {
-      var stPrev = null;
-      for (var si = 0; si < staffList.length; si++) {
-        if (staffList[si].id === prevSid) {
-          stPrev = staffList[si];
-          break;
-        }
-      }
-      if (stPrev) {
-        var objPrev = { flag: false };
-        if (canStaffServe(stPrev, objPrev)) {
-          chosenStaff = stPrev;
-          chosenPreferArea = objPrev.flag;
-        }
-      }
+    var needStaff = 1;
+    if (wIdx.needStaff >= 0) {
+      needStaff = Number(row[wIdx.needStaff] || 1) || 1;
     }
-        // ◆ まだ決まっていなければ、全スタッフから候補を探す
-    if (!chosenStaff) {
-      var candidates = [];
+    if (needStaff < 1) needStaff = 1;
+    if (needStaff > 2) needStaff = 2;
 
-      staffList.forEach(function (st) {
-        // ローテーション優先なら前回担当を候補から除外
-        if (avoidPrev && prevSid && st.id === prevSid) return;
+    var usedStaffIds = {};
+    var preferenceNoteAdded = false;
+    var enforcePreferenceFailure = false;
 
-        var obj = { flag: false };
-        if (!canStaffServe(st, obj)) return;
+    for (var slot = 1; slot <= needStaff; slot++) {
+      var chosenStaff = null;
+      var chosenPreferArea = false;
+      var allowFallback = !enforcePreferenceFailure;
 
-        // スタッフ側の緯度経度
-        var slat = st.lat;
-        var slng = st.lng;
+      if (contPref === '同じ人希望' && prevSid && !usedStaffIds[prevSid]) {
+        var stPrev = null;
+        for (var si = 0; si < staffList.length; si++) {
+          if (staffList[si].id === prevSid) { stPrev = staffList[si]; break; }
+        }
+        if (stPrev) {
+          var objPrev = { flag: false };
+          if (canStaffServe(stPrev, objPrev)) {
+            chosenStaff = stPrev;
+            chosenPreferArea = objPrev.flag;
+          }
+        }
+      }
 
-        // 距離と距離スコアを計算（どちらかが無ければ null 扱い）
-        var distKm = calcDistanceKm(plat, plng, slat, slng);
-        var distScore = distToScore(distKm); // 0 が一番近い
+      if (!chosenStaff) {
+        var candidates = [];
 
-        candidates.push({
-          staff: st,
-          dayCount: getAssignCount(st.id, dateStr),       // その日の件数
-          patientCount: getPatientWeekCount(pid, st.id),  // その週での患者×スタッフ回数
-          distKm: distKm,
-          distScore: distScore,
-          samePatientToday: false                         // 後で上書き
-        });
-      });
+        staffList.forEach(function(st){
+          if (usedStaffIds[st.id]) return;
+          if (ngSet[st.id]) return;
 
-      if (candidates.length > 0) {
-        // すでに同じ患者を同じ日に担当しているかチェック
-        candidates.forEach(function (c) {
-          var st = c.staff;
-          var sid = st.id;
-          var samePatientToday = false;
+          if (sexLimit === '女性のみ' && st.gender !== '女性') return;
+          if (sexLimit === '男性のみ' && st.gender !== '男性') return;
 
-          for (var r = 0; r < resultRows.length; r++) {
-            var rowR = resultRows[r];
-            var rStaffId = rowR[3]; // staff_id
-            var rPid = rowR[5];     // patient_id
-            var rDate = rowR[1];    // 日付(Date)
+          if (youbi && st.workDays.length > 0 && st.workDays.indexOf(youbi) === -1) return;
 
-            if (rStaffId === sid && rPid === pid) {
-              var rDateStr = Utilities.formatDate(rDate, tz, 'yyyy/MM/dd');
-              if (rDateStr === dateStr) {
-                samePatientToday = true;
-                break;
-              }
+          if (avoidPrev && prevSid && st.id === prevSid) return;
+
+          if (st.shiftStartMin != null && st.shiftEndMin != null) {
+
+            if (timeType === '固定') {
+              if (startMin != null && startMin < st.shiftStartMin) return;
+              if (endMin   != null && endMin   > st.shiftEndMin)   return;
+
+            } else {
+              var reqStart = earliestMin != null ? earliestMin : startMin;
+              var reqEnd   = latestMin   != null ? latestMin   : endMin;
+
+              if (reqStart == null) reqStart = st.shiftStartMin;
+              if (reqEnd   == null) reqEnd   = st.shiftEndMin;
+
+              var latestStart  = Math.max(reqStart, st.shiftStartMin);
+              var earliestEnd  = Math.min(reqEnd,   st.shiftEndMin);
+              if (latestStart >= earliestEnd) return;
             }
           }
-          c.samePatientToday = samePatientToday;
+
+          var dayCount = getAssignCount(st.id, dateStr);
+          if (dayCount >= st.maxPerDay) return;
+
+          var slat = st.lat;
+          var slng = st.lng;
+
+          var distKm = calcDistanceKm(plat, plng, slat, slng);
+          var distScore = distToScore(distKm);
+
+          candidates.push({
+            staff: st,
+            dayCount: getAssignCount(st.id, dateStr),
+            patientCount: getPatientWeekCount(pid, st.id),
+            distKm: distKm,
+            distScore: distScore,
+            samePatientToday: false
+          });
         });
 
-        // ★ 優先順位：
-        // 1) 同じ患者をその日にすでに担当している人（samePatientToday）
-        // 2) ローテーション優先なら、その週での担当回数が少ない人（patientCount）
-        // 3) 距離スコアが小さい人（distScore）
-        // 4) その日の件数が少ない人（dayCount）
-        candidates.sort(function (a, b) {
-          if (a.samePatientToday !== b.samePatientToday) {
-            return a.samePatientToday ? -1 : 1;
+        if (candidates.length > 0) {
+          candidates = applyStaffPreference(candidates, specifiedIdsArr, specifiedType, ngIdsArr);
+        }
+
+        if (candidates.length === 0 && specifiedType === '必須' && specifiedIdsArr.length > 0) {
+          enforcePreferenceFailure = true;
+          allowFallback = false;
+          if (!preferenceNoteAdded) {
+            note = (note || '') + ' / 指定条件により候補なし';
+            preferenceNoteAdded = true;
           }
+        }
 
-          if (contPref === 'ローテーション優先' && a.patientCount !== b.patientCount) {
-            return a.patientCount - b.patientCount;
-          }
+        if (candidates.length > 0) {
+          candidates.forEach(function (c) {
+            var st = c.staff;
+            var sid = st.id;
+            var samePatientToday = false;
 
-          if (a.distScore !== b.distScore) {
-            return a.distScore - b.distScore;
-          }
+            for (var r = 0; r < resultRows.length; r++) {
+              var rowR = resultRows[r];
+              var rStaffId = rowR[3];
+              var rPid = rowR[5];
+              var rDate = rowR[1];
 
-          return a.dayCount - b.dayCount;
-        });
+              if (rStaffId === sid && rPid === pid) {
+                var rDateStr = Utilities.formatDate(rDate, tz, 'yyyy/MM/dd');
+                if (rDateStr === dateStr) { samePatientToday = true; break; }
+              }
+            }
+            c.samePatientToday = samePatientToday;
+          });
 
-        chosenStaff = candidates[0].staff;
+          candidates.sort(function (a, b) {
+            if (a._pref !== b._pref) { return b._pref - a._pref; }
+            if (a.samePatientToday !== b.samePatientToday) { return a.samePatientToday ? -1 : 1; }
+            if (contPref === 'ローテーション優先' && a.patientCount !== b.patientCount) { return a.patientCount - b.patientCount; }
+            if (a.distScore !== b.distScore) { return a.distScore - b.distScore; }
+            return a.dayCount - b.dayCount;
+          });
+
+          chosenStaff = candidates[0].staff;
+        }
       }
-    }
 
-    // -----------------------------
-    // ★ 第2フェーズ：少し条件をゆるめてでも割当する
-    // （最大訪問件数/日の制限だけ無視する）
-    // -----------------------------
-    if (!chosenStaff) {
-      var fallback = [];
+      if (!chosenStaff && allowFallback) {
+        var fallback = [];
+        staffList.forEach(function (st) {
+          if (usedStaffIds[st.id]) return;
+          if (ngSet[st.id]) return;
 
-      staffList.forEach(function (st) {
-        // 性別制限は守る
-        if (sexLimit === '女性のみ' && st.gender !== '女性') return;
-        if (sexLimit === '男性のみ' && st.gender !== '男性') return;
+          if (sexLimit === '女性のみ' && st.gender !== '女性') return;
+          if (sexLimit === '男性のみ' && st.gender !== '男性') return;
 
-        // 勤務曜日は守る
-        if (youbi && st.workDays.length > 0 && st.workDays.indexOf(youbi) === -1) return;
+          if (youbi && st.workDays.length > 0 && st.workDays.indexOf(youbi) === -1) return;
 
-        // シフト時間も守る
-        if (startMin != null && st.shiftStartMin != null && startMin < st.shiftStartMin) return;
-        if (endMin   != null && st.shiftEndMin   != null && endMin   > st.shiftEndMin)   return;
+          if (startMin != null && st.shiftStartMin != null && startMin < st.shiftStartMin) return;
+          if (endMin   != null && st.shiftEndMin   != null && endMin   > st.shiftEndMin)   return;
 
-        // ★ここでは maxPerDay は見ない（= 上限超えてもOK）
-        var dayCount = getAssignCount(st.id, dateStr);
-
-        fallback.push({
-          staff   : st,
-          dayCount: dayCount
-        });
-      });
-
-      if (fallback.length > 0) {
-        // その日の件数が少ない人から使う
-        fallback.sort(function(a, b) {
-          return a.dayCount - b.dayCount;
+          fallback.push({ staff: st, dayCount: getAssignCount(st.id, dateStr) });
         });
 
-        chosenStaff = fallback[0].staff;
-
-        // 備考に「上限超過で自動割当」と追記
-        note = (note || '') + ' / 自動割当: 上限超過の可能性あり';
+        if (fallback.length > 0) {
+          fallback.sort(function(a,b){ return a.dayCount - b.dayCount; });
+          chosenStaff = fallback[0].staff;
+          note = (note || '') + ' / 自動割当: 上限超過の可能性あり';
+        }
       }
+
+      var staffId   = '';
+      var staffName = '';
+      if (chosenStaff) {
+        staffId   = chosenStaff.id;
+        staffName = chosenStaff.name;
+
+        usedStaffIds[staffId] = true;
+        incAssignCount(staffId, dateStr);
+        incPatientWeekCount(pid, staffId);
+      } else {
+        staffName = '未割当';
+      }
+
+      var visitId = 'V' + Utilities.formatString('%03d', idx + 1);
+      if (needStaff > 1) visitId = visitId + '-' + slot;
+
+      var note2 = note || '';
+      if (needStaff > 1) {
+        note2 = (note2 ? note2 + ' / ' : '') + '同時訪問(' + slot + '/' + needStaff + ')';
+      }
+
+      resultRows.push([
+        visitId,     //1
+        dateObj,     //2
+        youbiRaw,    //3
+        staffId,     //4
+        staffName,   //5
+        pid,         //6
+        pname,       //7
+        area,        //8
+        start,       //9
+        end,         //10
+        svcMin,      //11
+        timeType,    //12
+        earliest,    //13
+        latest,      //14
+        note2        //15
+      ]);
     }
-
-    // ◆ staffId/staffName を決める   ← この行の直前までを差し替え
-
-    // ◆ staffId/staffName を決める
-    var staffId   = '';
-    var staffName = '';
-        if (chosenStaff) {
-      staffId   = chosenStaff.id;
-      staffName = chosenStaff.name;
-      incAssignCount(staffId, dateStr);     // その日の件数
-      incPatientWeekCount(pid, staffId);    // ★その週の「患者×スタッフ」回数
-    } else {
-      staffId   = '';
-      staffName = '未割当';
-    }
-
-    var visitId = 'V' + Utilities.formatString('%03d', idx + 1);
-    resultRows.push([
-  visitId,      //1
-  dateObj,      //2
-  youbiRaw,     //3
-  staffId,      //4
-  staffName,    //5
-  pid,          //6
-  pname,        //7
-  area,         //8
-  start,        //9
-  end,          //10
-  svcMin,       //11
-  timeType,     //12
-  earliest,     //13
-  latest,       //14
-  note,         //15
-]);
   });
   // ◆ ここから：固定＆同じ開始時刻グループのルート最適化（時刻は変えずに並びだけ最短に）
 
@@ -1451,6 +1517,10 @@ function 週間リクエストを生成() {
     '性別制限',
     '継続希望',
     'サービス時間',
+    '必要スタッフ数',
+    '指定スタッフID',
+    '指定タイプ',
+    'NGスタッフID',
     '備考'
   ];
 
@@ -1486,6 +1556,10 @@ function 週間リクエストを生成() {
       name     : row[idx['患者名']] || '',
       area     : row[idx['エリア']] || '',
       svcMin   : row[idx['サービス時間']],
+      needStaff: Number(row[idx['必要スタッフ数']] || 1) || 1,
+      staffIds : row[idx['指定スタッフID']] || '',
+      staffType: row[idx['指定タイプ']] || '',
+      ngStaffIds: row[idx['NGスタッフID']] || '',
       sexLimit : row[idx['性別制限']],
       contPref : row[idx['継続希望']],
       timeType : (timeTypeColIndex >= 0 ? row[timeTypeColIndex] : '') || '',
@@ -1753,6 +1827,10 @@ function 週間リクエストを生成() {
             start       : win.start,
             end         : win.end,
             svcMin      : svcMin,
+            needStaff   : info.needStaff || 1,
+            specifiedIds: info.staffIds || '',
+            specifiedType: info.staffType || '',
+            ngStaffIds  : info.ngStaffIds || '',
             sexLimit    : sexLimit,
             contPref    : contPref,
             changeType  : '通常',
@@ -1883,6 +1961,10 @@ function 週間リクエストを生成() {
             start       : win.start,
             end         : win.end,
             svcMin      : svcMin,
+            needStaff   : baseInfo.needStaff || 1,
+            specifiedIds: baseInfo.staffIds || '',
+            specifiedType: baseInfo.staffType || '',
+            ngStaffIds  : baseInfo.ngStaffIds || '',
             sexLimit    : baseInfo.sexLimit || '',
             contPref    : baseInfo.contPref || '',
             changeType  : '追加',
@@ -1986,6 +2068,10 @@ function 週間リクエストを生成() {
     '開始時刻',
     '終了時刻',
     'サービス時間',
+    '必要スタッフ数',
+    '指定スタッフID',
+    '指定タイプ',
+    'NGスタッフID',
     '性別制限',
     '継続希望',
     '変更区分（通常/変更/追加/キャンセル）',
@@ -2011,6 +2097,10 @@ function 週間リクエストを生成() {
     req.start,
     req.end,
     req.svcMin,
+    req.needStaff || 1,
+    req.specifiedIds || '',
+    req.specifiedType || '',
+    req.ngStaffIds || '',
     req.sexLimit,
     req.contPref,
     req.changeType,
