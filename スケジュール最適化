@@ -256,7 +256,7 @@ function 割当結果を作成() {
   var weeklySheet = ss.getSheetByName('週間リクエスト');
   var staffSheet  = ss.getSheetByName('スタッフマスタ');
   var resultSheet = ss.getSheetByName('割当結果');
- var historySheet = ss.getSheetByName('訪問履歴');  // ★追加
+  var historySheet = ss.getSheetByName('訪問履歴');  // ★追加
   var patientSheet = ss.getSheetByName('患者マスタ');
   if (!patientSheet) {
     SpreadsheetApp.getUi().alert('「患者マスタ」シートがありません。');
@@ -267,9 +267,9 @@ function 割当結果を作成() {
     SpreadsheetApp.getUi().alert('「週間リクエスト」「スタッフマスタ」「割当結果」シートがあるか確認してください。');
     return;
   }
-      if (!historySheet) {
+  if (!historySheet) {
     historySheet = ss.insertSheet('訪問履歴');
-  } 
+  }
   if (historySheet.getLastRow() === 0) {
     var histHeader = [
       'visit_id',
@@ -289,29 +289,29 @@ function 割当結果を作成() {
   }
 
   function calcDistanceKm(lat1, lng1, lat2, lng2) {
-  if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return null;
+    if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return null;
 
-  const R = 6371; // 地球半径 km
-  const toRad = Math.PI / 180;
-  const dLat = (lat2 - lat1) * toRad;
-  const dLng = (lng2 - lng1) * toRad;
+    const R = 6371; // 地球半径 km
+    const toRad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * toRad;
+    const dLng = (lng2 - lng1) * toRad;
 
-  const a =
-    Math.sin(dLat/2) * Math.sin(dLat/2) +
-    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
-    Math.sin(dLng/2) * Math.sin(dLng/2);
+    const a =
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
+      Math.sin(dLng/2) * Math.sin(dLng/2);
 
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c;
-}
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  }
 
-function distToScore(km) {
-  if (km == null) return 99; // 不明は遠い扱い
-  if (km <= 2)  return 0;  // 2km以内
-  if (km <= 5)  return 1;  // 5km以内
-  if (km <= 10) return 2;  // 10km以内
-  return 5;                // かなり遠い
-}
+  function distToScore(km) {
+    if (km == null) return 99; // 不明は遠い扱い
+    if (km <= 2)  return 0;  // 2km以内
+    if (km <= 5)  return 1;  // 5km以内
+    if (km <= 10) return 2;  // 10km以内
+    return 5;                // かなり遠い
+  }
 
   // ◆ 週間リクエスト読み込み
   var wValues = weeklySheet.getDataRange().getValues();
@@ -321,62 +321,56 @@ function distToScore(km) {
   }
   var wHeader = wValues[0];
   var wData   = wValues.slice(1);
-    var wIdx = {
-    date      : wHeader.indexOf('日付'),
-    youbi     : wHeader.indexOf('曜日'),
-    pid       : wHeader.indexOf('patient_id'),
-    pname     : wHeader.indexOf('患者名'),
-    area      : wHeader.indexOf('エリア'),
-    start     : wHeader.indexOf('開始時刻'),
-    end       : wHeader.indexOf('終了時刻'),
-    svcMin    : wHeader.indexOf('サービス時間'),
-    sexLimit  : wHeader.indexOf('性別制限'),
-    contPref  : wHeader.indexOf('継続希望'),
-    change    : wHeader.indexOf('変更区分（通常/変更/追加/キャンセル）'),
-    prevSid   : wHeader.indexOf('前回担当スタッフID'),
-    prevSname : wHeader.indexOf('前回担当スタッフ名'),
-    timeType  : wHeader.indexOf('時間タイプ'),     // ★追加
-    earliest  : wHeader.indexOf('希望最早時刻'),   // ★追加
-    latest    : wHeader.indexOf('希望最遅時刻'),   // ★追加
-    note      : wHeader.indexOf('備考'),
-    needStaff : wHeader.indexOf('必要スタッフ数'),
+  var wIdx = {
+    date         : wHeader.indexOf('日付'),
+    youbi        : wHeader.indexOf('曜日'),
+    pid          : wHeader.indexOf('patient_id'),
+    pname        : wHeader.indexOf('患者名'),
+    area         : wHeader.indexOf('エリア'),
+    start        : wHeader.indexOf('開始時刻'),
+    end          : wHeader.indexOf('終了時刻'),
+    svcMin       : wHeader.indexOf('サービス時間'),
+    sexLimit     : wHeader.indexOf('性別制限'),
+    contPref     : wHeader.indexOf('継続希望'),
+    change       : wHeader.indexOf('変更区分（通常/変更/追加/キャンセル）'),
+    prevSid      : wHeader.indexOf('前回担当スタッフID'),
+    prevSname    : wHeader.indexOf('前回担当スタッフ名'),
+    timeType     : wHeader.indexOf('時間タイプ'),     // ★追加
+    earliest     : wHeader.indexOf('希望最早時刻'),   // ★追加
+    latest       : wHeader.indexOf('希望最遅時刻'),   // ★追加
+    note         : wHeader.indexOf('備考'),
+    needStaff    : wHeader.indexOf('必要スタッフ数'),
     specifiedIds : wHeader.indexOf('指定スタッフID'),
     specifiedType: wHeader.indexOf('指定タイプ'),
     ngStaffIds   : wHeader.indexOf('NGスタッフID')
   };
-
-    var patientSheet = ss.getSheetByName('患者マスタ');
-  if (!patientSheet) {
-    SpreadsheetApp.getUi().alert('「患者マスタ」シートが見つかりません。');
-    return;
-  }
 
   // 患者マスタ読み込み（patient_id → {lat, lng, area,...}）
   var pValues = patientSheet.getDataRange().getValues();
   var pHeader = pValues[0];
   var pData   = pValues.slice(1);
 
- var pIdx = {
-  id   : pHeader.indexOf('patient_id'),
-  name : pHeader.indexOf('患者名'),
-  area : pHeader.indexOf('エリア'),
-  lat  : pHeader.indexOf('緯度'),
-  lng  : pHeader.indexOf('経度'),
-  svcMin: pHeader.indexOf('サービス時間')  // ★追加
-};
-
-var patientMap = {};
-pData.forEach(function(row){
-  var id = row[pIdx.id];
-  if (!id) return;
-  patientMap[id] = {
-    name: row[pIdx.name],
-    area: row[pIdx.area],
-    lat : Number(row[pIdx.lat]) || null,
-    lng : Number(row[pIdx.lng]) || null,
-    svcMin: Number(row[pIdx.svcMin]) || 0    // ★追加：分数（30など）
+  var pIdx = {
+    id    : pHeader.indexOf('patient_id'),
+    name  : pHeader.indexOf('患者名'),
+    area  : pHeader.indexOf('エリア'),
+    lat   : pHeader.indexOf('緯度'),
+    lng   : pHeader.indexOf('経度'),
+    svcMin: pHeader.indexOf('サービス時間')  // ★追加
   };
-});
+
+  var patientMap = {};
+  pData.forEach(function(row){
+    var id = row[pIdx.id];
+    if (!id) return;
+    patientMap[id] = {
+      name : row[pIdx.name],
+      area : row[pIdx.area],
+      lat  : Number(row[pIdx.lat]) || null,
+      lng  : Number(row[pIdx.lng]) || null,
+      svcMin: Number(row[pIdx.svcMin]) || 0    // ★追加：分数（30など）
+    };
+  });
 
   // ◆ スタッフマスタ読み込み
   var sValues = staffSheet.getDataRange().getValues();
